@@ -1,0 +1,38 @@
+# Security / Environment
+.env
+
+# MachDown Specific
+server/data/*.db
+server/downloads/
+server/bin/
+client/build/bin/
+
+# Go
+/vendor/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/bin/
+
+# Svelte / Node.js
+node_modules/
+/build/
+.svelte-kit/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# MacOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>MachDown Client</title>
+    <link rel="stylesheet" href="./src/style.css">
+</head>
+<body>
+<div id="app">
+
+    <!-- ===== TELA DE CONFIGURAÇÃO (primeiro acesso) ===== -->
+    <div id="screen-setup" style="display:none">
+        <h1>MachDown</h1>
+        <p class="subtitle">Configure sua conexão com o servidor</p>
+        <div class="card">
+            <div class="setup-header">
+                <h2>⚙️ Configurações</h2>
+                <button id="back-btn" class="icon-btn" onclick="cancelSetup()" style="display:none" title="Voltar sem salvar">← Voltar</button>
+            </div>
+            <div class="input-group">
+                <label>Server URL <span class="required">*</span></label>
+                <input id="server_url" type="text" placeholder="http://localhost:8888"/>
+            </div>
+            <div class="input-group">
+                <label>API Key <span class="required">*</span></label>
+                <input id="api_key" type="password" placeholder="UUID gerado no primeiro start do servidor"/>
+            </div>
+            <div class="input-group">
+                <label>Client ID (Nome do Dispositivo) <span class="required">*</span></label>
+                <input id="client_id" type="text" placeholder="meu-pc"/>
+            </div>
+            <div class="input-group">
+                <label>Pasta de Download (Padrão)</label>
+                <input id="download_path" type="text" placeholder="~/Downloads/MachDown"/>
+            </div>
+            <div class="input-group">
+                <label>Mapeamento de Sites (JSON Opcional)</label>
+                <textarea id="site_mappings" placeholder='{"workupload.com": "/caminho/especifico"}' rows="3" style="width: 100%; padding: 8px; border-radius: 4px; background: #222; color: #fff; border: 1px solid #444; font-family: monospace;"></textarea>
+            </div>
+            <button id="save-btn" onclick="saveConfig()">Salvar e Conectar</button>
+            <div id="status"></div>
+        </div>
+    </div>
+
+    <!-- ===== TELA PRINCIPAL (Dashboard) ===== -->
+    <div id="screen-main" style="display:none">
+        <div class="main-header">
+            <h1>MachDown</h1>
+            <div>
+                <button id="admin-btn" class="icon-btn" onclick="openAdmin()" title="Administrar Servidor">🛡️</button>
+                <button id="settings-btn" class="icon-btn" onclick="openSettings()" title="Configurações">⚙️</button>
+            </div>
+        </div>
+        <div class="card">
+            <h2>📥 Sincronizações Ativas</h2>
+            <ul id="jobs-list">
+                <li class="empty">Nenhuma sincronização ativa</li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- ===== TELA DE ADMINISTRAÇÃO DO SERVIDOR ===== -->
+    <div id="screen-admin" style="display:none">
+        <div class="main-header">
+            <h1>🛡️ Admin Server</h1>
+            <button class="icon-btn" onclick="closeAdmin()" title="Voltar ao Dashboard">← Voltar</button>
+        </div>
+        
+        <div class="card">
+            <h2>⚙️ Configurações do Servidor</h2>
+            <div class="input-group">
+                <label>Storage Path (Apenas Leitura)</label>
+                <input id="server_storage_path" type="text" placeholder="./downloads" readonly style="background-color: #333; color: #aaa; cursor: not-allowed;"/>
+            </div>
+            <div class="input-group">
+                <label>Max Downloads Concorrentes</label>
+                <input id="server_max_concurrent" type="number" placeholder="8"/>
+            </div>
+            <button onclick="saveServerConfig()">Salvar no Servidor</button>
+            <div id="admin-config-status"></div>
+        </div>
+
+        <div class="card" style="margin-top: 15px;">
+            <h2>🔑 Chaves de API (API Keys)</h2>
+            <p>Gerencie as chaves de acesso para os clientes se conectarem.</p>
+            <ul id="api-keys-list">
+                <li class="empty">Carregando chaves...</li>
+            </ul>
+            <div style="display:flex; gap: 10px; margin-top: 10px;">
+                <input id="new_api_key_name" type="text" placeholder="Nome da nova chave (ex: Laptop)" style="flex-grow: 1; padding: 5px;" />
+                <button onclick="createAPIKey()">➕ Criar Chave</button>
+            </div>
+        </div>
+
+        <div class="card" style="margin-top: 15px;">
+            <h2>💻 Clientes Conectados</h2>
+            <p>Dispositivos que se comunicaram recentemente com o servidor.</p>
+            <ul id="clients-list">
+                <li class="empty">Carregando clientes...</li>
+            </ul>
+        </div>
+
+        <div class="card" style="margin-top: 15px;">
+            <h2>Limpeza de Servidor</h2>
+            <p>Limpe arquivos órfãos e downloads com erro para liberar espaço no servidor.</p>
+            <button onclick="cleanServer()">Limpar Servidor</button>
+            <div id="admin-clean-status"></div>
+        </div>
+
+        <div class="card" style="margin-top: 15px;">
+            <h2>Arquivos no Servidor</h2>
+            <div style="display:flex; gap: 10px; margin-bottom: 10px; align-items:center;">
+                <button onclick="loadServerFiles()">🔄 Atualizar</button>
+                <button onclick="deleteSelected()" style="background-color: #ef4444; color: white; border: none; padding: 5px 10px; cursor: pointer; border-radius: 4px;">🗑️ Excluir Selecionados</button>
+                <button onclick="syncSelected()" style="background-color: #3b82f6; color: white; border: none; padding: 5px 10px; cursor: pointer; border-radius: 4px;">📥 Baixar Selecionados</button>
+                <div style="flex-grow: 1;"></div>
+                <label style="font-size: 0.9em; cursor: pointer;">
+                    <input type="checkbox" id="select-all" onclick="toggleSelectAll()"> Todos
+                </label>
+            </div>
+            <ul id="server-files-list">
+                <li class="empty">Nenhum arquivo encontrado</li>
+            </ul>
+        </div>
+    </div>
+
+</div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

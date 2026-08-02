@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  machdown-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: machdown-server
+    env_file:
+      - .env
+    environment:
+      - MACHDOWN_PORT=${MACHDOWN_PORT:-8888}
+      - MACHDOWN_API_KEY=${MACHDOWN_API_KEY:-}
+    ports:
+      - "${MACHDOWN_PORT:-8888}:${MACHDOWN_PORT:-8888}"
+    volumes:
+      # Monta as pastas data (banco SQLite) e downloads para persistência
+      - ./server/data:/app/data
+      - ./server/downloads:/app/downloads
+    restart: unless-stopped
