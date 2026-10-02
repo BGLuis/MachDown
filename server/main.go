@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -129,29 +128,8 @@ func main() {
 	}))
 
 	app.Use(cors.New(cors.Config{
-		AllowOriginsFunc: func(origin string) bool {
-			if origin == "" || origin == "null" {
-				return true
-			}
-			if strings.HasPrefix(origin, "http://localhost") ||
-				strings.HasPrefix(origin, "https://localhost") ||
-				strings.HasPrefix(origin, "http://127.0.0.1") ||
-				strings.HasPrefix(origin, "https://127.0.0.1") ||
-				strings.HasPrefix(origin, "chrome-extension://") ||
-				strings.HasPrefix(origin, "wails://") {
-				return true
-			}
-			allowed := os.Getenv("MACHDOWN_ALLOWED_ORIGINS")
-			if allowed != "" {
-				for _, o := range strings.Split(allowed, ",") {
-					if strings.TrimSpace(o) == origin {
-						return true
-					}
-				}
-			}
-			return false
-		},
-		AllowHeaders: "Origin, Content-Type, Accept, X-API-Key, X-Client-ID",
+		AllowOriginsFunc: api.IsAllowedOrigin,
+		AllowHeaders:     "Origin, Content-Type, Accept, X-API-Key, X-Client-ID",
 	}))
 
 	// Configurar rotas
