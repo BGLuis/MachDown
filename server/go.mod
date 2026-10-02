@@ -1,6 +1,6 @@
 module machdown/server
 
-go 1.26.5
+go 1.27.1
 
 require (
 	github.com/glebarez/sqlite v1.11.0
