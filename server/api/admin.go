@@ -93,7 +93,6 @@ func (ctrl *AdminController) HandleUpdateConfig(c *fiber.Ctx) error {
 	ctrl.db.First(&config)
 
 	var updateData struct {
-		APIKey                 string `json:"api_key"`
 		StoragePath            string `json:"storage_path"`
 		MaxConcurrentDownloads int    `json:"max_concurrent_downloads"`
 	}
@@ -102,9 +101,6 @@ func (ctrl *AdminController) HandleUpdateConfig(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid JSON"})
 	}
 
-	if updateData.APIKey != "" {
-		config.APIKey = updateData.APIKey
-	}
 	if updateData.MaxConcurrentDownloads > 0 {
 		config.MaxConcurrentDownloads = updateData.MaxConcurrentDownloads
 	}

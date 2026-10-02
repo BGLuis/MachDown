@@ -3,9 +3,12 @@ package main
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"log"
 	"math/big"
 	"net"
@@ -41,6 +44,11 @@ func main() {
 		if err := generateSelfSignedCert(certFile, keyFile); err != nil {
 			log.Fatal("Falha ao gerar certificados TLS:", err)
 		}
+	}
+	if fp, err := certFingerprint(certFile); err != nil {
+		log.Printf("Não foi possível calcular o fingerprint do certificado: %v", err)
+	} else {
+		log.Printf("Fingerprint SHA-256 do certificado (configure no Client): %s", fp)
 	}
 
 	db, err := gorm.Open(sqlite.Open(filepath.Join(dbDir, "machdown.db")), &gorm.Config{})
@@ -79,18 +87,22 @@ func main() {
 		log.Println("Servidor inicializado com configuração existente.")
 	}
 
-	// Migração para a tabela APIKey
-	var keyCount int64
-	db.Model(&models.APIKey{}).Count(&keyCount)
-	if keyCount == 0 && config.APIKey != "" {
+	// Migra a chave em texto puro para a tabela APIKey (hash Argon2id) e apaga o valor original
+	if config.APIKey != "" {
 		id, keyHash, prefix := models.GenerateAPIKeyData(config.APIKey)
-		db.Create(&models.APIKey{
-			ID:        id,
-			KeyHash:   keyHash,
-			KeyPrefix: prefix,
-			Name:      "Chave Inicial",
-			CreatedAt: time.Now(),
-		})
+		var existing int64
+		db.Model(&models.APIKey{}).Where("id = ?", id).Count(&existing)
+		if existing == 0 {
+			db.Create(&models.APIKey{
+				ID:        id,
+				KeyHash:   keyHash,
+				KeyPrefix: prefix,
+				Name:      "Chave Inicial",
+				CreatedAt: time.Now(),
+			})
+		}
+		config.APIKey = ""
+		db.Model(&config).Update("api_key", "")
 	}
 
 	// 3. Inicializar camadas
@@ -145,7 +157,7 @@ func main() {
 	// Configurar rotas
 	apiGroup := app.Group("/api")
 	apiGroup.Use(api.RateLimitMiddleware())
-	apiGroup.Use(api.RequireAuth(db, &config))
+	apiGroup.Use(api.RequireAuth(db))
 
 	apiGroup.Post("/downloads", apiController.HandleEnqueue)
 	apiGroup.Get("/downloads/completed", apiController.HandleListCompleted)
@@ -196,6 +208,21 @@ func main() {
 		log.Printf("Erro ao encerrar servidor: %v\n", err)
 	}
 	log.Println("Servidor encerrado")
+}
+
+// certFingerprint returns the hex SHA-256 of the leaf certificate's DER encoding,
+// which is the value clients pin to trust the self-signed certificate.
+func certFingerprint(certFile string) (string, error) {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return "", err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return "", errors.New("no PEM block found in " + certFile)
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func generateSelfSignedCert(certFile, keyFile string) error {

@@ -139,11 +139,19 @@ func (ctrl *APIController) HandleEvents(c *fiber.Ctx) error {
 	c.Set("Connection", "keep-alive")
 	c.Set("X-Accel-Buffering", "no")
 
+	clientID := c.Get("X-Client-ID")
+	if clientID == "" {
+		clientID = c.Query("client_id")
+	}
+
 	ch := ctrl.downloadService.Hub.Subscribe()
 
 	c.Context().SetBodyStreamWriter(fasthttp.StreamWriter(func(w *bufio.Writer) {
 		defer ctrl.downloadService.Hub.Unsubscribe(ch)
 		for evt := range ch {
+			if !evt.IsFor(clientID) {
+				continue
+			}
 			data, err := json.Marshal(evt)
 			if err != nil {
 				continue

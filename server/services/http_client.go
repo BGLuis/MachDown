@@ -7,7 +7,7 @@ import (
 )
 
 var sharedTransport = &http.Transport{
-	Proxy:                 http.ProxyFromEnvironment,
+	// No Proxy: the SSRF guard validates the destination IP at dial time, which a proxy would bypass.
 	DialContext:           SafeDialContext(30 * time.Second),
 	ForceAttemptHTTP2:     true,
 	MaxIdleConns:          100,

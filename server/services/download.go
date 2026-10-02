@@ -1,6 +1,7 @@
 package services
 
 import (
+	"encoding/json"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -30,6 +31,26 @@ type ProgressEvent struct {
 	Status    string `json:"status"`
 	BytesDone int64  `json:"bytes_done"`
 	TotalSize int64  `json:"total_size"`
+	// TargetClients is the job's JSON array of client IDs; used only to route events.
+	TargetClients string `json:"-"`
+}
+
+// IsFor reports whether the event should reach clientID. An empty clientID
+// means the subscriber did not identify itself and receives everything.
+func (e ProgressEvent) IsFor(clientID string) bool {
+	if clientID == "" {
+		return true
+	}
+	var targets []string
+	if err := json.Unmarshal([]byte(e.TargetClients), &targets); err != nil {
+		return false
+	}
+	for _, t := range targets {
+		if t == clientID {
+			return true
+		}
+	}
+	return false
 }
 
 // ProgressHub gerencia os canais SSE dos clientes conectados.
@@ -125,7 +146,7 @@ func getCategoryFromFileName(fileName string) string {
 		return "Videos"
 	case ".mp3", ".wav", ".flac", ".aac", ".ogg":
 		return "Audio"
-	case ".exe", ".msi", ".dmg", ".pkg", ".deb", ".rpm", ".AppImage":
+	case ".exe", ".msi", ".dmg", ".pkg", ".deb", ".rpm", ".appimage":
 		return "Programs"
 	case ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt":
 		return "Documents"
@@ -251,7 +272,7 @@ func (s *DownloadService) processJob(job *models.DownloadJob) {
 	log.Printf("[JOB %s] Iniciando processamento.", job.ID)
 	_ = s.repo.UpdateJobStatus(job.ID, "Downloading")
 	job.Status = "Downloading"
-	s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Downloading", TotalSize: job.TotalSize})
+	s.Hub.Broadcast(ProgressEvent{JobID: job.ID, TargetClients: job.TargetClients, Status: "Downloading", TotalSize: job.TotalSize})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	job.CancelFunc = cancel
@@ -271,7 +292,7 @@ func (s *DownloadService) processJob(job *models.DownloadJob) {
 		if err != nil {
 			log.Printf("[JOB %s] Download sequencial falhou: %v", job.ID, err)
 			_ = s.repo.UpdateJobStatus(job.ID, "Error")
-			s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Error"})
+			s.Hub.Broadcast(ProgressEvent{JobID: job.ID, TargetClients: job.TargetClients, Status: "Error"})
 		} else {
 			log.Printf("[JOB %s] Download sequencial concluído.", job.ID)
 			
@@ -287,7 +308,7 @@ func (s *DownloadService) processJob(job *models.DownloadJob) {
 			_ = s.repo.UpdateJobFileName(job.ID, job.FileName)
 			
 			_ = s.repo.UpdateJobStatus(job.ID, "Completed")
-			s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Completed", BytesDone: job.TotalSize, TotalSize: job.TotalSize})
+			s.Hub.Broadcast(ProgressEvent{JobID: job.ID, TargetClients: job.TargetClients, Status: "Completed", BytesDone: job.TotalSize, TotalSize: job.TotalSize})
 		}
 		return
 	}
@@ -297,7 +318,7 @@ func (s *DownloadService) processJob(job *models.DownloadJob) {
 	if err != nil {
 		log.Printf("[JOB %s] Erro ao alocar arquivo esparso: %v", job.ID, err)
 		_ = s.repo.UpdateJobStatus(job.ID, "Error")
-		s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Error"})
+		s.Hub.Broadcast(ProgressEvent{JobID: job.ID, TargetClients: job.TargetClients, Status: "Error"})
 		return
 	}
 
@@ -396,10 +417,11 @@ func (s *DownloadService) startChunks(ctx context.Context, job *models.DownloadJ
 				bytesDone += chunk.EndByte - chunk.StartByte + 1
 				job.BytesDownloaded = bytesDone
 				s.Hub.Broadcast(ProgressEvent{
-					JobID:     job.ID,
-					Status:    "Downloading",
-					BytesDone: bytesDone,
-					TotalSize: job.TotalSize,
+					JobID:         job.ID,
+					TargetClients: job.TargetClients,
+					Status:        "Downloading",
+					BytesDone:     bytesDone,
+					TotalSize:     job.TotalSize,
 				})
 				mu.Unlock()
 			}
@@ -417,7 +439,7 @@ func (s *DownloadService) startChunks(ctx context.Context, job *models.DownloadJ
 		log.Printf("[JOB %s] %d chunks falharam (primeiro erro: %v). Marcando como Error.", job.ID, failedCount, firstErr)
 		_ = s.repo.UpdateJobStatus(job.ID, "Error")
 		job.Status = "Error"
-		s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Error", BytesDone: bytesDone, TotalSize: job.TotalSize})
+		s.Hub.Broadcast(ProgressEvent{JobID: job.ID, TargetClients: job.TargetClients, Status: "Error", BytesDone: bytesDone, TotalSize: job.TotalSize})
 		return
 	}
 
@@ -426,7 +448,7 @@ func (s *DownloadService) startChunks(ctx context.Context, job *models.DownloadJ
 	if err != nil {
 		log.Printf("[JOB %s] Erro ao calcular SHA-256 do arquivo completo: %v", job.ID, err)
 		_ = s.repo.UpdateJobStatus(job.ID, "Error")
-		s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Error"})
+		s.Hub.Broadcast(ProgressEvent{JobID: job.ID, TargetClients: job.TargetClients, Status: "Error"})
 		return
 	}
 
@@ -438,7 +460,7 @@ func (s *DownloadService) startChunks(ctx context.Context, job *models.DownloadJ
 	log.Printf("[JOB %s] Todos os chunks finalizados. SHA-256: %s. Marcando como Completed.", job.ID, fileHash)
 
 	_ = s.repo.UpdateJobStatus(job.ID, "Completed")
-	s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Completed", BytesDone: job.TotalSize, TotalSize: job.TotalSize})
+	s.Hub.Broadcast(ProgressEvent{JobID: job.ID, TargetClients: job.TargetClients, Status: "Completed", BytesDone: job.TotalSize, TotalSize: job.TotalSize})
 }
 
 func (s *DownloadService) PauseDownload(jobID string) error {
@@ -456,7 +478,7 @@ func (s *DownloadService) PauseDownload(jobID string) error {
 
 	job.Status = "Paused"
 	_ = s.repo.UpdateJobStatus(jobID, "Paused")
-	s.Hub.Broadcast(ProgressEvent{JobID: jobID, Status: "Paused", TotalSize: job.TotalSize})
+	s.Hub.Broadcast(ProgressEvent{JobID: jobID, TargetClients: job.TargetClients, Status: "Paused", TotalSize: job.TotalSize})
 
 	return nil
 }
@@ -473,7 +495,7 @@ func (s *DownloadService) ResumeDownload(jobID string) error {
 
 	_ = s.repo.UpdateJobStatus(job.ID, "Queued")
 	job.Status = "Queued"
-	s.Hub.Broadcast(ProgressEvent{JobID: jobID, Status: "Queued", TotalSize: job.TotalSize})
+	s.Hub.Broadcast(ProgressEvent{JobID: jobID, TargetClients: job.TargetClients, Status: "Queued", TotalSize: job.TotalSize})
 	
 	ctx, cancel := context.WithCancel(context.Background())
 	job.CancelFunc = cancel
@@ -484,7 +506,7 @@ func (s *DownloadService) ResumeDownload(jobID string) error {
 
 		_ = s.repo.UpdateJobStatus(job.ID, "Downloading")
 		job.Status = "Downloading"
-		s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Downloading", TotalSize: job.TotalSize})
+		s.Hub.Broadcast(ProgressEvent{JobID: job.ID, TargetClients: job.TargetClients, Status: "Downloading", TotalSize: job.TotalSize})
 
 		s.activeMu.Lock()
 		s.activeJobs[job.ID] = job

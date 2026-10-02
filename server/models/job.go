@@ -43,7 +43,7 @@ type ChunkTask struct {
 
 type ServerConfig struct {
 	ID                     uint   `gorm:"primaryKey"`
-	APIKey                 string `json:"api_key"` // DEPRECATED: use APIKey table
+	APIKey                 string `json:"-"` // legacy plaintext column; migrated to the hashed APIKey table and cleared at startup
 	StoragePath            string `json:"storage_path"`
 	MaxConcurrentDownloads int    `json:"max_concurrent_downloads"`
 }
