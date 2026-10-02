@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -8,11 +9,13 @@ import (
 	"log"
 	"machdown/server/models"
 	"machdown/server/storage"
+	"math/rand"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type ChunkDownloader struct {
@@ -23,9 +26,9 @@ func NewChunkDownloader(dm *storage.DiskManager) *ChunkDownloader {
 	return &ChunkDownloader{diskManager: dm}
 }
 
-func (c *ChunkDownloader) DownloadChunk(job *models.DownloadJob, chunk *models.ChunkTask) error {
+func (c *ChunkDownloader) DownloadChunk(ctx context.Context, job *models.DownloadJob, chunk *models.ChunkTask) error {
 	log.Printf("[JOB %s] Chunk %d-%d: Requesting GET %s", job.ID, chunk.StartByte, chunk.EndByte, job.URL)
-	req, err := http.NewRequest("GET", job.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", job.URL, nil)
 	if err != nil {
 		return err
 	}
@@ -40,23 +43,24 @@ func (c *ChunkDownloader) DownloadChunk(job *models.DownloadJob, chunk *models.C
 	// Request specific byte range
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", chunk.StartByte, chunk.EndByte))
 	
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return http.ErrUseLastResponse
+	client := GetSharedHTTPClient()
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return http.ErrUseLastResponse
+		}
+		if len(via) > 0 {
+			if cookie := via[0].Header.Get("Cookie"); cookie != "" {
+				req.Header.Set("Cookie", cookie)
 			}
-			if len(via) > 0 {
-				if cookie := via[0].Header.Get("Cookie"); cookie != "" {
-					req.Header.Set("Cookie", cookie)
-				}
-				if ua := via[0].Header.Get("User-Agent"); ua != "" {
-					req.Header.Set("User-Agent", ua)
-				}
+			if ua := via[0].Header.Get("User-Agent"); ua != "" {
+				req.Header.Set("User-Agent", ua)
 			}
-			return nil
-		},
+		}
+		return nil
 	}
-	resp, err := client.Do(req)
+	resp, err := RetryDownload(func() (*http.Response, error) {
+		return client.Do(req)
+	})
 	if err != nil {
 		return err
 	}
@@ -76,7 +80,7 @@ func (c *ChunkDownloader) DownloadChunk(job *models.DownloadJob, chunk *models.C
 	log.Printf("[JOB %s] Chunk %d-%d: Got response, saving to disk...", job.ID, chunk.StartByte, chunk.EndByte)
 
 	// Open the sparse file to write this chunk
-	filePath := c.diskManager.GetFilePath(job.ID)
+	filePath := c.diskManager.GetFilePath(job.ID, "")
 	f, err := os.OpenFile(filePath, os.O_WRONLY, 0644)
 	if err != nil {
 		return err
@@ -107,8 +111,8 @@ func (c *ChunkDownloader) DownloadChunk(job *models.DownloadJob, chunk *models.C
 	return nil
 }
 
-func (c *ChunkDownloader) DownloadSequential(job *models.DownloadJob) error {
-	req, err := http.NewRequest("GET", job.URL, nil)
+func (c *ChunkDownloader) DownloadSequential(ctx context.Context, job *models.DownloadJob) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", job.URL, nil)
 	if err != nil {
 		return err
 	}
@@ -120,23 +124,24 @@ func (c *ChunkDownloader) DownloadSequential(job *models.DownloadJob) error {
 		req.Header.Set("User-Agent", job.UserAgent)
 	}
 
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return http.ErrUseLastResponse
+	client := GetSharedHTTPClient()
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return http.ErrUseLastResponse
+		}
+		if len(via) > 0 {
+			if cookie := via[0].Header.Get("Cookie"); cookie != "" {
+				req.Header.Set("Cookie", cookie)
 			}
-			if len(via) > 0 {
-				if cookie := via[0].Header.Get("Cookie"); cookie != "" {
-					req.Header.Set("Cookie", cookie)
-				}
-				if ua := via[0].Header.Get("User-Agent"); ua != "" {
-					req.Header.Set("User-Agent", ua)
-				}
+			if ua := via[0].Header.Get("User-Agent"); ua != "" {
+				req.Header.Set("User-Agent", ua)
 			}
-			return nil
-		},
+		}
+		return nil
 	}
-	resp, err := client.Do(req)
+	resp, err := RetryDownload(func() (*http.Response, error) {
+		return client.Do(req)
+	})
 	if err != nil {
 		return err
 	}
@@ -152,7 +157,7 @@ func (c *ChunkDownloader) DownloadSequential(job *models.DownloadJob) error {
 		return fmt.Errorf("download sequencial recebeu HTML em vez de arquivo (content-type: %s). URL pode precisar de resolução de link direto", contentType)
 	}
 
-	filePath := c.diskManager.GetFilePath(job.ID)
+	filePath := c.diskManager.GetFilePath(job.ID, "")
 	os.MkdirAll(filepath.Dir(filePath), 0755)
 
 	cd := resp.Header.Get("Content-Disposition")
@@ -173,5 +178,31 @@ func (c *ChunkDownloader) DownloadSequential(job *models.DownloadJob) error {
 	_, err = io.Copy(f, resp.Body)
 	log.Printf("[JOB %s] Sequential download wrote bytes, error: %v", job.ID, err)
 	return err
+}
+
+// RetryDownload retries the given operation with exponential backoff and jitter.
+func RetryDownload(operation func() (*http.Response, error)) (*http.Response, error) {
+	var resp *http.Response
+	var err error
+	maxRetries := 3
+	baseDelay := 1 * time.Second
+
+	for i := 0; i <= maxRetries; i++ {
+		resp, err = operation()
+		if err == nil {
+			return resp, nil
+		}
+		
+		if i == maxRetries {
+			break
+		}
+
+		delay := baseDelay * (1 << i)
+		jitter := time.Duration(rand.Int63n(int64(delay) / 5 + 1))
+		time.Sleep(delay + jitter)
+		log.Printf("Retry %d/%d after %v due to error: %v", i+1, maxRetries, delay+jitter, err)
+	}
+
+	return resp, err
 }
 

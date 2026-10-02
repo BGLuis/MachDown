@@ -1,14 +1,24 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"log"
+	"math/big"
+	"net"
 	"machdown/server/api"
 	"machdown/server/models"
 	"machdown/server/repositories"
 	"machdown/server/services"
 	"machdown/server/storage"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -24,10 +34,24 @@ func main() {
 	dbDir := "./data"
 	os.MkdirAll(dbDir, 0755)
 
+	certFile := filepath.Join(dbDir, "server.crt")
+	keyFile := filepath.Join(dbDir, "server.key")
+	if _, err := os.Stat(certFile); os.IsNotExist(err) {
+		log.Println("Gerando certificados TLS self-signed...")
+		if err := generateSelfSignedCert(certFile, keyFile); err != nil {
+			log.Fatal("Falha ao gerar certificados TLS:", err)
+		}
+	}
+
 	db, err := gorm.Open(sqlite.Open(filepath.Join(dbDir, "machdown.db")), &gorm.Config{})
 	if err != nil {
 		log.Fatal("Falha ao conectar ao banco de dados:", err)
 	}
+
+	db.Exec("PRAGMA journal_mode=WAL")
+	db.Exec("PRAGMA synchronous=NORMAL")
+	db.Exec("PRAGMA cache_size=-64000")
+	db.Exec("PRAGMA busy_timeout=5000")
 
 	// Auto Migrate (inclui o novo campo ETag, APIKey e Client)
 	db.AutoMigrate(&models.DownloadJob{}, &models.ChunkTask{}, &models.ServerConfig{}, &models.APIKey{}, &models.Client{})
@@ -59,8 +83,11 @@ func main() {
 	var keyCount int64
 	db.Model(&models.APIKey{}).Count(&keyCount)
 	if keyCount == 0 && config.APIKey != "" {
+		id, keyHash, prefix := models.GenerateAPIKeyData(config.APIKey)
 		db.Create(&models.APIKey{
-			Key:       config.APIKey,
+			ID:        id,
+			KeyHash:   keyHash,
+			KeyPrefix: prefix,
 			Name:      "Chave Inicial",
 			CreatedAt: time.Now(),
 		})
@@ -74,7 +101,7 @@ func main() {
 	// ProgressHub: gerencia os canais SSE dos clientes conectados
 	hub := services.NewProgressHub()
 
-	downloadService := services.NewDownloadService(jobRepo, chunkDownloader, diskManager, hub)
+	downloadService := services.NewDownloadService(jobRepo, chunkDownloader, diskManager, hub, config.MaxConcurrentDownloads)
 
 	apiController := api.NewAPIController(downloadService)
 
@@ -90,12 +117,34 @@ func main() {
 	}))
 
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: "*",
-		AllowHeaders: "Origin, Content-Type, Accept, X-API-Key",
+		AllowOriginsFunc: func(origin string) bool {
+			if origin == "" || origin == "null" {
+				return true
+			}
+			if strings.HasPrefix(origin, "http://localhost") ||
+				strings.HasPrefix(origin, "https://localhost") ||
+				strings.HasPrefix(origin, "http://127.0.0.1") ||
+				strings.HasPrefix(origin, "https://127.0.0.1") ||
+				strings.HasPrefix(origin, "chrome-extension://") ||
+				strings.HasPrefix(origin, "wails://") {
+				return true
+			}
+			allowed := os.Getenv("MACHDOWN_ALLOWED_ORIGINS")
+			if allowed != "" {
+				for _, o := range strings.Split(allowed, ",") {
+					if strings.TrimSpace(o) == origin {
+						return true
+					}
+				}
+			}
+			return false
+		},
+		AllowHeaders: "Origin, Content-Type, Accept, X-API-Key, X-Client-ID",
 	}))
 
 	// Configurar rotas
 	apiGroup := app.Group("/api")
+	apiGroup.Use(api.RateLimitMiddleware())
 	apiGroup.Use(api.RequireAuth(db, &config))
 
 	apiGroup.Post("/downloads", apiController.HandleEnqueue)
@@ -104,6 +153,9 @@ func main() {
 	apiGroup.Get("/downloads/progress", apiController.HandleSSEProgress)
 	apiGroup.Get("/downloads/:id/file", apiController.HandleDownloadFile)
 	apiGroup.Post("/downloads/:id/synced", apiController.HandleMarkSynced)
+	apiGroup.Post("/jobs/:id/pause", apiController.HandlePauseDownload)
+	apiGroup.Post("/jobs/:id/resume", apiController.HandleResumeDownload)
+	apiGroup.Get("/events", apiController.HandleEvents)
 
 	adminController := api.NewAdminController(db, diskManager)
 	apiGroup.Get("/admin/jobs", adminController.HandleListAllJobs)
@@ -127,5 +179,82 @@ func main() {
 	}
 	
 	log.Printf("MachDown Server rodando em :%s\n", port)
-	log.Fatal(app.Listen(":" + port))
+	
+	go func() {
+		if err := app.ListenTLS(":"+port, certFile, keyFile); err != nil {
+			log.Printf("Erro no servidor: %v\n", err)
+		}
+	}()
+
+	// Graceful Shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Encerrando servidor graciosamente...")
+	if err := app.ShutdownWithTimeout(30 * time.Second); err != nil {
+		log.Printf("Erro ao encerrar servidor: %v\n", err)
+	}
+	log.Println("Servidor encerrado")
+}
+
+func generateSelfSignedCert(certFile, keyFile string) error {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return err
+	}
+
+	notBefore := time.Now()
+	notAfter := notBefore.Add(365 * 24 * time.Hour)
+
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return err
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"MachDown"},
+		},
+		NotBefore: notBefore,
+		NotAfter:  notAfter,
+
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	template.IPAddresses = append(template.IPAddresses, net.ParseIP("127.0.0.1"))
+	template.DNSNames = append(template.DNSNames, "localhost")
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return err
+	}
+
+	certOut, err := os.Create(certFile)
+	if err != nil {
+		return err
+	}
+	defer certOut.Close()
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}); err != nil {
+		return err
+	}
+
+	keyOut, err := os.Create(keyFile)
+	if err != nil {
+		return err
+	}
+	defer keyOut.Close()
+	privBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return err
+	}
+	if err := pem.Encode(keyOut, &pem.Block{Type: "PRIVATE KEY", Bytes: privBytes}); err != nil {
+		return err
+	}
+
+	return nil
 }

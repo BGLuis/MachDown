@@ -1,9 +1,13 @@
 package services
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"log"
+	"os"
 	"machdown/server/models"
 	"machdown/server/repositories"
 	"machdown/server/storage"
@@ -11,6 +15,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,15 +80,24 @@ type DownloadService struct {
 	disk       *storage.DiskManager
 	Hub        *ProgressHub
 	resolver   *LinkResolver
+
+	activeJobs map[string]*models.DownloadJob
+	activeMu   sync.RWMutex
+	activeDownloads chan struct{}
 }
 
-func NewDownloadService(repo *repositories.JobRepository, cd *ChunkDownloader, disk *storage.DiskManager, hub *ProgressHub) *DownloadService {
+func NewDownloadService(repo *repositories.JobRepository, cd *ChunkDownloader, disk *storage.DiskManager, hub *ProgressHub, maxConcurrent int) *DownloadService {
+	if maxConcurrent <= 0 {
+		maxConcurrent = 8
+	}
 	return &DownloadService{
-		repo:       repo,
-		downloader: cd,
-		disk:       disk,
-		Hub:        hub,
-		resolver:   NewLinkResolver(),
+		repo:            repo,
+		downloader:      cd,
+		disk:            disk,
+		Hub:             hub,
+		resolver:        NewLinkResolver(),
+		activeJobs:      make(map[string]*models.DownloadJob),
+		activeDownloads: make(chan struct{}, maxConcurrent),
 	}
 }
 
@@ -97,11 +111,45 @@ func (s *DownloadService) MarkJobSynced(jobID string) error {
 
 // GetFilePath expõe o path físico do arquivo para o controller servir via HTTP.
 func (s *DownloadService) GetFilePath(jobID string) string {
-	return s.disk.GetFilePath(jobID)
+	job, err := s.repo.FindJobByID(jobID)
+	if err != nil || job == nil {
+		return ""
+	}
+	return s.disk.FindFilePath(jobID)
+}
+
+func getCategoryFromFileName(fileName string) string {
+	ext := strings.ToLower(filepath.Ext(fileName))
+	switch ext {
+	case ".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv":
+		return "Videos"
+	case ".mp3", ".wav", ".flac", ".aac", ".ogg":
+		return "Audio"
+	case ".exe", ".msi", ".dmg", ".pkg", ".deb", ".rpm", ".AppImage":
+		return "Programs"
+	case ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt":
+		return "Documents"
+	case ".zip", ".rar", ".7z", ".tar", ".gz":
+		return "Archives"
+	case ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg":
+		return "Images"
+	default:
+		return "Others"
+	}
 }
 
 
 func (s *DownloadService) Enqueue(rawURL string, targetClients string, cookies string, userAgent string) (*models.DownloadJob, error) {
+	if err := isInternalURL(rawURL); err != nil {
+		return nil, fmt.Errorf("SSRF guard: invalid or internal URL: %w", err)
+	}
+
+	if existingJob, err := s.repo.FindByURL(rawURL); err == nil && existingJob != nil {
+		if existingJob.Status != "Failed" && existingJob.Status != "Error" {
+			return nil, fmt.Errorf("URL already exists or is downloading")
+		}
+	}
+
 	// --- Resolução do link direto de download ---
 	// Muitos sites de file hosting (WorkUpload, Mediafire, etc.) não entregam
 	// o arquivo diretamente pela URL da página — precisamos resolver o link real.
@@ -129,22 +177,8 @@ func (s *DownloadService) Enqueue(rawURL string, targetClients string, cookies s
 		req.Header.Set("User-Agent", userAgent)
 	}
 
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return http.ErrUseLastResponse
-			}
-			if len(via) > 0 {
-				if cookie := via[0].Header.Get("Cookie"); cookie != "" {
-					req.Header.Set("Cookie", cookie)
-				}
-				if ua := via[0].Header.Get("User-Agent"); ua != "" {
-					req.Header.Set("User-Agent", ua)
-				}
-			}
-			return nil
-		},
-	}
+	client := GetSharedHTTPClient()
+	client.CheckRedirect = SafeCheckRedirect(10)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -188,9 +222,10 @@ func (s *DownloadService) Enqueue(rawURL string, targetClients string, cookies s
 		ID:            uuid.New().String(),
 		URL:           url,
 		FileName:      fileName,
+		Category:      getCategoryFromFileName(fileName),
 		TotalSize:     totalSize,
 		ETag:          etag,
-		Status:        "Pending",
+		Status:        "Queued",
 		TargetClients: targetClients,
 		Cookies:       cookies,
 		UserAgent:     userAgent,
@@ -210,19 +245,43 @@ func (s *DownloadService) Enqueue(rawURL string, targetClients string, cookies s
 }
 
 func (s *DownloadService) processJob(job *models.DownloadJob) {
+	s.activeDownloads <- struct{}{}
+	defer func() { <-s.activeDownloads }()
+
 	log.Printf("[JOB %s] Iniciando processamento.", job.ID)
 	_ = s.repo.UpdateJobStatus(job.ID, "Downloading")
+	job.Status = "Downloading"
 	s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Downloading", TotalSize: job.TotalSize})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	job.CancelFunc = cancel
+
+	s.activeMu.Lock()
+	s.activeJobs[job.ID] = job
+	s.activeMu.Unlock()
+	defer func() {
+		s.activeMu.Lock()
+		delete(s.activeJobs, job.ID)
+		s.activeMu.Unlock()
+	}()
 
 	if job.TotalSize == 0 {
 		log.Printf("[JOB %s] Tamanho desconhecido (sem Content-Length). Usando download sequencial.", job.ID)
-		err := s.downloader.DownloadSequential(job)
+		err := s.downloader.DownloadSequential(ctx, job)
 		if err != nil {
 			log.Printf("[JOB %s] Download sequencial falhou: %v", job.ID, err)
 			_ = s.repo.UpdateJobStatus(job.ID, "Error")
 			s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Error"})
 		} else {
 			log.Printf("[JOB %s] Download sequencial concluído.", job.ID)
+			
+			filePath := s.disk.FindFilePath(job.ID)
+			fileHash, hErr := computeFileSHA256(filePath)
+			if hErr == nil && fileHash != "" {
+				job.RootHash = fileHash
+				_ = s.repo.UpdateRootHash(job.ID, fileHash)
+				log.Printf("[JOB %s] Hash SHA-256 sequencial calculado: %s", job.ID, fileHash)
+			}
 			
 			// O nome do arquivo pode ter sido descoberto via Content-Disposition durante o download
 			_ = s.repo.UpdateJobFileName(job.ID, job.FileName)
@@ -233,8 +292,8 @@ func (s *DownloadService) processJob(job *models.DownloadJob) {
 		return
 	}
 
-	// Alocar arquivo esparso
-	_, err := s.disk.AllocateFile(job.ID, job.TotalSize)
+	// Alocar arquivo esparso com categoria correta
+	_, err := s.disk.AllocateFile(job.ID, job.Category, job.TotalSize)
 	if err != nil {
 		log.Printf("[JOB %s] Erro ao alocar arquivo esparso: %v", job.ID, err)
 		_ = s.repo.UpdateJobStatus(job.ID, "Error")
@@ -242,14 +301,43 @@ func (s *DownloadService) processJob(job *models.DownloadJob) {
 		return
 	}
 
+	s.startChunks(ctx, job, false)
+}
+
+func computeFileSHA256(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func cleanupChunkFiles(filePath string) {
+	dir := filepath.Dir(filePath)
+	base := filepath.Base(filePath)
+	matches, err := filepath.Glob(filepath.Join(dir, base+".chunk_*"))
+	if err == nil {
+		for _, m := range matches {
+			_ = os.Remove(m)
+		}
+	}
+}
+
+func (s *DownloadService) startChunks(ctx context.Context, job *models.DownloadJob, isResume bool) {
 	// Dividir em chunks
-	var chunks []models.ChunkTask
+	var allChunks []models.ChunkTask
 	for i := int64(0); i < job.TotalSize; i += chunkSize {
 		end := i + chunkSize - 1
 		if end >= job.TotalSize {
 			end = job.TotalSize - 1
 		}
-		chunks = append(chunks, models.ChunkTask{
+		allChunks = append(allChunks, models.ChunkTask{
 			ID:        uuid.New().String(),
 			JobID:     job.ID,
 			StartByte: i,
@@ -258,16 +346,30 @@ func (s *DownloadService) processJob(job *models.DownloadJob) {
 		})
 	}
 
-	log.Printf("[JOB %s] Arquivo alocado. Dividindo em %d chunks. Iniciando workers...", job.ID, len(chunks))
+	filePath := s.disk.FindFilePath(job.ID)
+	var pendingChunks []models.ChunkTask
+	bytesDone := int64(0)
+	for _, c := range allChunks {
+		chunkFile := fmt.Sprintf("%s.chunk_%d", filePath, c.StartByte)
+		if _, err := os.Stat(chunkFile); os.IsNotExist(err) {
+			pendingChunks = append(pendingChunks, c)
+		} else {
+			bytesDone += c.EndByte - c.StartByte + 1
+		}
+	}
+	job.BytesDownloaded = bytesDone
+
+	log.Printf("[JOB %s] Arquivo alocado. Total: %d chunks (%d pendentes). Iniciando workers...", job.ID, len(allChunks), len(pendingChunks))
 
 	var (
-		wg        sync.WaitGroup
-		mu        sync.Mutex
-		bytesDone int64
+		wg          sync.WaitGroup
+		mu          sync.Mutex
+		failedCount int
+		firstErr    error
 	)
 	sem := make(chan struct{}, 8)
 
-	for _, c := range chunks {
+	for _, c := range pendingChunks {
 		wg.Add(1)
 		sem <- struct{}{} // acquire
 
@@ -275,13 +377,24 @@ func (s *DownloadService) processJob(job *models.DownloadJob) {
 			defer wg.Done()
 			defer func() { <-sem }() // release
 
-			err := s.downloader.DownloadChunk(job, &chunk)
+			err := s.downloader.DownloadChunk(ctx, job, &chunk)
 			if err != nil {
 				log.Printf("[JOB %s] Chunk %d-%d falhou: %v", job.ID, chunk.StartByte, chunk.EndByte, err)
+				mu.Lock()
+				failedCount++
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
 			} else {
 				log.Printf("[JOB %s] Chunk %d-%d concluído com hash: %s", job.ID, chunk.StartByte, chunk.EndByte, chunk.Hash)
+				
+				chunkFile := fmt.Sprintf("%s.chunk_%d", filePath, chunk.StartByte)
+				_ = os.WriteFile(chunkFile, []byte("done"), 0644)
+				
 				mu.Lock()
 				bytesDone += chunk.EndByte - chunk.StartByte + 1
+				job.BytesDownloaded = bytesDone
 				s.Hub.Broadcast(ProgressEvent{
 					JobID:     job.ID,
 					Status:    "Downloading",
@@ -295,13 +408,97 @@ func (s *DownloadService) processJob(job *models.DownloadJob) {
 
 	wg.Wait()
 
-	// --- Merkle Tree: calcular RootHash a partir dos hashes dos chunks ---
-	rootHash := computeMerkleRoot(chunks)
-	_ = s.repo.UpdateRootHash(job.ID, rootHash)
-	log.Printf("[JOB %s] Todos os chunks finalizados. RootHash Merkle: %s. Marcando como Completed.", job.ID, rootHash)
+	if ctx.Err() != nil {
+		log.Printf("[JOB %s] Cancelado/Pausado.", job.ID)
+		return
+	}
+
+	if failedCount > 0 {
+		log.Printf("[JOB %s] %d chunks falharam (primeiro erro: %v). Marcando como Error.", job.ID, failedCount, firstErr)
+		_ = s.repo.UpdateJobStatus(job.ID, "Error")
+		job.Status = "Error"
+		s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Error", BytesDone: bytesDone, TotalSize: job.TotalSize})
+		return
+	}
+
+	// --- Calcular SHA-256 do arquivo completo ---
+	fileHash, err := computeFileSHA256(filePath)
+	if err != nil {
+		log.Printf("[JOB %s] Erro ao calcular SHA-256 do arquivo completo: %v", job.ID, err)
+		_ = s.repo.UpdateJobStatus(job.ID, "Error")
+		s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Error"})
+		return
+	}
+
+	// Limpar marcadores de chunks
+	cleanupChunkFiles(filePath)
+
+	job.RootHash = fileHash
+	_ = s.repo.UpdateRootHash(job.ID, fileHash)
+	log.Printf("[JOB %s] Todos os chunks finalizados. SHA-256: %s. Marcando como Completed.", job.ID, fileHash)
 
 	_ = s.repo.UpdateJobStatus(job.ID, "Completed")
 	s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Completed", BytesDone: job.TotalSize, TotalSize: job.TotalSize})
+}
+
+func (s *DownloadService) PauseDownload(jobID string) error {
+	s.activeMu.RLock()
+	job, exists := s.activeJobs[jobID]
+	s.activeMu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("job is not active")
+	}
+
+	if job.CancelFunc != nil {
+		job.CancelFunc()
+	}
+
+	job.Status = "Paused"
+	_ = s.repo.UpdateJobStatus(jobID, "Paused")
+	s.Hub.Broadcast(ProgressEvent{JobID: jobID, Status: "Paused", TotalSize: job.TotalSize})
+
+	return nil
+}
+
+func (s *DownloadService) ResumeDownload(jobID string) error {
+	job, err := s.repo.FindJobByID(jobID)
+	if err != nil {
+		return err
+	}
+
+	if job.Status != "Paused" && job.Status != "Error" {
+		return fmt.Errorf("job is not paused")
+	}
+
+	_ = s.repo.UpdateJobStatus(job.ID, "Queued")
+	job.Status = "Queued"
+	s.Hub.Broadcast(ProgressEvent{JobID: jobID, Status: "Queued", TotalSize: job.TotalSize})
+	
+	ctx, cancel := context.WithCancel(context.Background())
+	job.CancelFunc = cancel
+
+	go func() {
+		s.activeDownloads <- struct{}{}
+		defer func() { <-s.activeDownloads }()
+
+		_ = s.repo.UpdateJobStatus(job.ID, "Downloading")
+		job.Status = "Downloading"
+		s.Hub.Broadcast(ProgressEvent{JobID: job.ID, Status: "Downloading", TotalSize: job.TotalSize})
+
+		s.activeMu.Lock()
+		s.activeJobs[job.ID] = job
+		s.activeMu.Unlock()
+
+		defer func() {
+			s.activeMu.Lock()
+			delete(s.activeJobs, job.ID)
+			s.activeMu.Unlock()
+		}()
+		s.startChunks(ctx, job, true)
+	}()
+
+	return nil
 }
 
 // computeMerkleRoot constrói uma Merkle Tree dos hashes dos chunks

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -101,20 +102,12 @@ func resolveWorkUpload(r *LinkResolver, originalURL string, cookies string, user
 
 	// Cookie jar compartilhado para toda a sessão
 	jar := &cookieJar{cookies: make(map[string][]*http.Cookie)}
-	sessionClient := &http.Client{
-		Timeout: 60 * time.Second,
-		Jar:     jar,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return http.ErrUseLastResponse
-			}
-			propagateHeaders(req, via)
-			return nil
-		},
-		Transport: &http.Transport{
-			DisableKeepAlives: true,
-		},
-	}
+	transportClone := GetSharedTransport().Clone()
+	transportClone.DisableKeepAlives = true
+	sessionClient := GetSharedHTTPClient()
+	sessionClient.Jar = jar
+	sessionClient.Transport = transportClone
+	sessionClient.CheckRedirect = SafeCheckRedirect(10)
 
 	ua := userAgent
 	if ua == "" {
@@ -264,6 +257,10 @@ func resolve1Fichier(_ *LinkResolver, originalURL string, cookies string, userAg
 
 // resolveMediafire extrai o link de download direto do Mediafire.
 func resolveMediafire(r *LinkResolver, originalURL string, cookies string, userAgent string) ResolveResult {
+	if err := isInternalURL(originalURL); err != nil {
+		log.Printf("[RESOLVER][Mediafire] Security error: %v", err)
+		return ResolveResult{URL: originalURL, Cookies: cookies}
+	}
 	req, err := http.NewRequest("GET", originalURL, nil)
 	if err != nil {
 		return ResolveResult{URL: originalURL, Cookies: cookies}
@@ -341,10 +338,14 @@ func propagateHeaders(req *http.Request, via []*http.Request) {
 
 // cookieJar é um jar de cookies simples para gerenciar sessões HTTP.
 type cookieJar struct {
+	mu      sync.RWMutex
 	cookies map[string][]*http.Cookie
 }
 
 func (j *cookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
 	host := j.normalizeHost(u.Hostname())
 	
 	// Para evitar cookies duplicados obsoletos, vamos sobrescrever cookies com o mesmo nome
@@ -369,6 +370,9 @@ func (j *cookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 }
 
 func (j *cookieJar) Cookies(u *url.URL) []*http.Cookie {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+
 	host := j.normalizeHost(u.Hostname())
 	var result []*http.Cookie
 	result = append(result, j.cookies[host]...)
@@ -382,6 +386,9 @@ func (j *cookieJar) Cookies(u *url.URL) []*http.Cookie {
 }
 
 func (j *cookieJar) setRaw(host, rawCookies string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
 	host = j.normalizeHost(host)
 	for _, part := range strings.Split(rawCookies, ";") {
 		part = strings.TrimSpace(part)
@@ -419,16 +426,11 @@ type LinkResolver struct {
 // NewLinkResolver cria um novo LinkResolver com timeout configurado.
 func NewLinkResolver() *LinkResolver {
 	return &LinkResolver{
-		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 15 {
-					return http.ErrUseLastResponse
-				}
-				propagateHeaders(req, via)
-				return nil
-			},
-		},
+		httpClient: func() *http.Client {
+			c := GetSharedHTTPClient()
+			c.CheckRedirect = SafeCheckRedirect(15)
+			return c
+		}(),
 	}
 }
 
@@ -470,9 +472,14 @@ func isDirectDownload(resp *http.Response) bool {
 func (r *LinkResolver) ResolveWithSession(rawURL string, cookies string, userAgent string) ResolveResult {
 	log.Printf("[RESOLVER] Tentando resolver URL: %s", rawURL)
 
-	parsedURL, err := url.Parse(rawURL)
+	if cached, ok := getCachedResolveResult(rawURL); ok {
+		log.Printf("[RESOLVER] Usando cache para URL: %s", rawURL)
+		return cached
+	}
+
+	parsedURL, err := ValidateURL(rawURL)
 	if err != nil {
-		log.Printf("[RESOLVER] URL inválida: %v", err)
+		log.Printf("[RESOLVER] URL rejeitada: %v", err)
 		return ResolveResult{URL: rawURL, Cookies: cookies}
 	}
 
@@ -485,6 +492,7 @@ func (r *LinkResolver) ResolveWithSession(rawURL string, cookies string, userAge
 		}
 	}
 
+	var res ResolveResult
 	if matchedRule == nil {
 		log.Printf("[RESOLVER] Nenhuma regra específica para %s. Verificando diretamente.", parsedURL.Hostname())
 		finalURL, err := r.probeURL(rawURL, cookies, userAgent)
@@ -492,10 +500,13 @@ func (r *LinkResolver) ResolveWithSession(rawURL string, cookies string, userAge
 			log.Printf("[RESOLVER] Probe falhou: %v. Usando URL original.", err)
 			return ResolveResult{URL: rawURL, Cookies: cookies}
 		}
-		return ResolveResult{URL: finalURL, Cookies: cookies}
+		res = ResolveResult{URL: finalURL, Cookies: cookies}
+	} else {
+		res = matchedRule.resolve(r, rawURL, cookies, userAgent)
 	}
 
-	return matchedRule.resolve(r, rawURL, cookies, userAgent)
+	cacheResolveResult(rawURL, res)
+	return res
 }
 
 // Resolve é mantido por compatibilidade — usa ResolveWithSession internamente.
@@ -506,6 +517,9 @@ func (r *LinkResolver) Resolve(rawURL string, cookies string, userAgent string) 
 
 // probeURL faz um HEAD request para verificar se a URL é um download direto.
 func (r *LinkResolver) probeURL(rawURL string, cookies string, userAgent string) (string, error) {
+	if err := isInternalURL(rawURL); err != nil {
+		return "", fmt.Errorf("security error: %w", err)
+	}
 	req, err := http.NewRequest("HEAD", rawURL, nil)
 	if err != nil {
 		return "", err
@@ -543,4 +557,30 @@ func (r *LinkResolver) setHeaders(req *http.Request, cookies, userAgent, referer
 	if referer != "" {
 		req.Header.Set("Referer", referer)
 	}
+}
+
+type cacheEntry struct {
+	result ResolveResult
+	exp    time.Time
+}
+
+var resolveCache sync.Map
+
+// getCachedResolveResult checks the cache for a cached resolution.
+func getCachedResolveResult(url string) (ResolveResult, bool) {
+	if val, ok := resolveCache.Load(url); ok {
+		entry := val.(cacheEntry)
+		if time.Now().Before(entry.exp) {
+			return entry.result, true
+		}
+		resolveCache.Delete(url)
+	}
+	return ResolveResult{}, false
+}
+
+func cacheResolveResult(url string, result ResolveResult) {
+	resolveCache.Store(url, cacheEntry{
+		result: result,
+		exp:    time.Now().Add(10 * time.Minute),
+	})
 }

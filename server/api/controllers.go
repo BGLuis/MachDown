@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"machdown/server/services"
+	"os"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/valyala/fasthttp"
@@ -39,6 +40,9 @@ func (ctrl *APIController) HandleEnqueue(c *fiber.Ctx) error {
 
 	job, err := ctrl.downloadService.Enqueue(req.URL, string(targetClientsJSON), req.Cookies, req.UserAgent)
 	if err != nil {
+		if err.Error() == "URL already exists or is downloading" {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 
@@ -63,6 +67,12 @@ func (ctrl *APIController) HandleListCompleted(c *fiber.Ctx) error {
 func (ctrl *APIController) HandleDownloadFile(c *fiber.Ctx) error {
 	jobID := c.Params("id")
 	path := ctrl.downloadService.GetFilePath(jobID)
+	if path == "" {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "File not found"})
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "File not found on disk"})
+	}
 	return c.SendFile(path)
 }
 
@@ -70,6 +80,22 @@ func (ctrl *APIController) HandleMarkSynced(c *fiber.Ctx) error {
 	jobID := c.Params("id")
 	err := ctrl.downloadService.MarkJobSynced(jobID)
 	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.SendStatus(fiber.StatusOK)
+}
+
+func (ctrl *APIController) HandlePauseDownload(c *fiber.Ctx) error {
+	jobID := c.Params("id")
+	if err := ctrl.downloadService.PauseDownload(jobID); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.SendStatus(fiber.StatusOK)
+}
+
+func (ctrl *APIController) HandleResumeDownload(c *fiber.Ctx) error {
+	jobID := c.Params("id")
+	if err := ctrl.downloadService.ResumeDownload(jobID); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.SendStatus(fiber.StatusOK)
@@ -100,6 +126,34 @@ func (ctrl *APIController) HandleSSEProgress(c *fiber.Ctx) error {
 			}
 			if err := w.Flush(); err != nil {
 				return // cliente desconectou
+			}
+		}
+	}))
+
+	return nil
+}
+
+func (ctrl *APIController) HandleEvents(c *fiber.Ctx) error {
+	c.Set("Content-Type", "text/event-stream")
+	c.Set("Cache-Control", "no-cache")
+	c.Set("Connection", "keep-alive")
+	c.Set("X-Accel-Buffering", "no")
+
+	ch := ctrl.downloadService.Hub.Subscribe()
+
+	c.Context().SetBodyStreamWriter(fasthttp.StreamWriter(func(w *bufio.Writer) {
+		defer ctrl.downloadService.Hub.Unsubscribe(ch)
+		for evt := range ch {
+			data, err := json.Marshal(evt)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "event: job-update\n")
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				return
+			}
+			if err := w.Flush(); err != nil {
+				return
 			}
 		}
 	}))

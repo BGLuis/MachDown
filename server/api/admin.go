@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"machdown/server/models"
+	"machdown/server/repositories"
 	"machdown/server/storage"
-	"os"
 	"path/filepath"
 
 	"github.com/gofiber/fiber/v2"
@@ -30,36 +30,32 @@ type FileInfo struct {
 
 // HandleListFiles lista os arquivos armazenados no servidor
 func (ctrl *AdminController) HandleListFiles(c *fiber.Ctx) error {
-	var config models.ServerConfig
-	ctrl.db.First(&config)
-
-	files, err := os.ReadDir(config.StoragePath)
+	files, err := ctrl.diskManager.ListAllStoredFiles()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 
 	var fileList []FileInfo
 	for _, f := range files {
-		if !f.IsDir() {
-			info, err := f.Info()
-			if err == nil {
-				var job models.DownloadJob
-				if err := ctrl.db.Where("id = ?", f.Name()).First(&job).Error; err == nil {
-					fileList = append(fileList, FileInfo{
-						ID:     f.Name(),
-						Name:   job.FileName,
-						Size:   info.Size(),
-						Status: job.Status,
-					})
-				} else {
-					fileList = append(fileList, FileInfo{
-						ID:     f.Name(),
-						Name:   "Órfão: " + f.Name(),
-						Size:   info.Size(),
-						Status: "Unknown",
-					})
-				}
+		var job models.DownloadJob
+		if err := ctrl.db.Where("id = ?", f.ID).First(&job).Error; err == nil {
+			name := job.FileName
+			if name == "" {
+				name = f.ID
 			}
+			fileList = append(fileList, FileInfo{
+				ID:     f.ID,
+				Name:   name,
+				Size:   f.Size,
+				Status: job.Status,
+			})
+		} else {
+			fileList = append(fileList, FileInfo{
+				ID:     f.ID,
+				Name:   "Órfão: " + f.ID,
+				Size:   f.Size,
+				Status: "Unknown",
+			})
 		}
 	}
 
@@ -68,19 +64,12 @@ func (ctrl *AdminController) HandleListFiles(c *fiber.Ctx) error {
 
 // HandleDeleteFile exclui um arquivo do storage e o registro do db se existir
 func (ctrl *AdminController) HandleDeleteFile(c *fiber.Ctx) error {
-	filename := c.Params("filename")
-
-	var config models.ServerConfig
-	ctrl.db.First(&config)
-
-	filePath := filepath.Join(config.StoragePath, filename)
-
-	// Validação simples de path traversal
-	if filepath.Dir(filePath) != config.StoragePath && filepath.Dir(filePath) != filepath.Clean(config.StoragePath) {
+	filename := filepath.Base(c.Params("filename"))
+	if filename == "" || filename == "." || filename == "/" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid filename"})
 	}
 
-	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+	if err := ctrl.diskManager.DeleteJobFiles(filename); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 
@@ -127,15 +116,12 @@ func (ctrl *AdminController) HandleUpdateConfig(c *fiber.Ctx) error {
 
 // HandleClean limpa jobs com erro e seus arquivos órfãos
 func (ctrl *AdminController) HandleClean(c *fiber.Ctx) error {
-	var config models.ServerConfig
-	ctrl.db.First(&config)
-
 	var jobs []models.DownloadJob
 	ctrl.db.Where("status = ?", "Error").Find(&jobs)
 
 	count := 0
 	for _, j := range jobs {
-		os.Remove(filepath.Join(config.StoragePath, j.ID))
+		_ = ctrl.diskManager.DeleteJobFiles(j.ID)
 		ctrl.db.Where("job_id = ?", j.ID).Delete(&models.ChunkTask{})
 		ctrl.db.Delete(&j)
 		count++
@@ -153,16 +139,12 @@ func (ctrl *AdminController) HandleDeleteBatch(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid JSON"})
 	}
 
-	var config models.ServerConfig
-	ctrl.db.First(&config)
-
 	for _, id := range req.IDs {
-		filePath := filepath.Join(config.StoragePath, id)
-		// Basic path traversal check
-		if filepath.Dir(filePath) == config.StoragePath || filepath.Dir(filePath) == filepath.Clean(config.StoragePath) {
-			os.Remove(filePath)
-			ctrl.db.Where("id = ?", id).Delete(&models.DownloadJob{})
-			ctrl.db.Where("job_id = ?", id).Delete(&models.ChunkTask{})
+		safeID := filepath.Base(id)
+		if safeID != "" && safeID != "." && safeID != "/" {
+			_ = ctrl.diskManager.DeleteJobFiles(safeID)
+			ctrl.db.Where("id = ?", safeID).Delete(&models.DownloadJob{})
+			ctrl.db.Where("job_id = ?", safeID).Delete(&models.ChunkTask{})
 		}
 	}
 	return c.SendStatus(fiber.StatusOK)
@@ -232,14 +214,12 @@ func (ctrl *AdminController) HandleCreateAPIKey(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name and key are required"})
 	}
 
+	id, hash, prefix := models.GenerateAPIKeyData(req.Key)
 	newKey := models.APIKey{
-		Key:       req.Key,
+		ID:        id,
+		KeyHash:   hash,
+		KeyPrefix: prefix,
 		Name:      req.Name,
-		// time.Now() requires "time" import, but we didn't import it in admin.go! 
-		// Actually, let's just let Gorm handle CreatedAt by using a pointer or just not setting it if we don't have time imported.
-		// Wait, I can just not set CreatedAt and Gorm might auto-set it, or I can import time.
-		// Let me just not set it, or update imports. 
-		// Actually, let's use the DB's current time via GORM.
 	}
 
 	if err := ctrl.db.Create(&newKey).Error; err != nil {
@@ -262,7 +242,7 @@ func (ctrl *AdminController) HandleDeleteAPIKey(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cannot delete the last API key"})
 	}
 
-	if err := ctrl.db.Where("key = ?", key).Delete(&models.APIKey{}).Error; err != nil {
+	if err := ctrl.db.Where("id = ?", key).Delete(&models.APIKey{}).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 
@@ -280,8 +260,19 @@ func (ctrl *AdminController) HandleListClients(c *fiber.Ctx) error {
 
 // HandleListAllJobs lista todos os jobs do servidor
 func (ctrl *AdminController) HandleListAllJobs(c *fiber.Ctx) error {
-	var jobs []models.DownloadJob
-	if err := ctrl.db.Order("created_at desc").Limit(50).Find(&jobs).Error; err != nil {
+	page := c.QueryInt("page", 1)
+	limit := c.QueryInt("limit", 50)
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 50
+	}
+	offset := (page - 1) * limit
+
+	repo := repositories.NewJobRepository(ctrl.db)
+	jobs, err := repo.FindAllJobs(limit, offset)
+	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(jobs)
