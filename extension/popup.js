@@ -1,3 +1,14 @@
+// Sanitização contra XSS
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
 // --- Controle de Telas ---
 // Flag que indica se o usuário veio da tela principal (via botão ⚙️).
 // Quando true, o botão "← Voltar" é exibido na tela de configuração.
@@ -10,7 +21,7 @@ function showScreen(name) {
 
 // --- Tela de Configuração ---
 function loadConfigIntoForm(items) {
-    document.getElementById('server_url').value = items.server_url || 'http://localhost:8888';
+    document.getElementById('server_url').value = items.server_url || 'https://localhost:8888';
     document.getElementById('api_key').value    = items.api_key    || '';
     
     const interceptCheckbox = document.getElementById('intercept_enabled');
@@ -144,13 +155,15 @@ function fetchDownloads(items) {
         list.innerHTML = recent.map(j => {
             const isTarget = (j.target_clients || '').includes(items.client_id);
             const statusColor = j.status === 'Completed' ? '#4ade80' : (j.status === 'Error' ? '#ef4444' : '#facc15');
+            const safeName = escapeHtml(j.file_name || j.url);
+            const safeStatus = escapeHtml(j.status);
             return `
                 <li style="border-bottom: 1px solid #2e4460; padding: 6px 0;">
                     <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #e2e8f0;">
-                        ${j.file_name || j.url}
+                        ${safeName}
                     </div>
                     <div style="display:flex; justify-content:space-between; margin-top:2px;">
-                        <span style="color: ${statusColor}; font-weight:bold;">${j.status}</span>
+                        <span style="color: ${statusColor}; font-weight:bold;">${safeStatus}</span>
                         ${isTarget ? '<span style="color:#38bdf8;">(Para você)</span>' : ''}
                     </div>
                 </li>
@@ -158,7 +171,7 @@ function fetchDownloads(items) {
         }).join('');
     })
     .catch(err => {
-        list.innerHTML = `<li style="color:#ef4444; text-align:center;">Erro: ${err.message}</li>`;
+        list.innerHTML = `<li style="color:#ef4444; text-align:center;">Erro: ${escapeHtml(err.message)}</li>`;
     });
 }
 
@@ -168,10 +181,18 @@ document.getElementById('btn-refresh-downloads').addEventListener('click', () =>
     });
 });
 
-document.getElementById('btn-direct-download').addEventListener('click', () => {
+document.getElementById('btn-direct-download').addEventListener('click', async () => {
     const urlInput = document.getElementById('direct_url');
     const url = urlInput.value.trim();
     if (!url) return;
+
+    let cookieStr = "";
+    try {
+        const cookies = await chrome.cookies.getAll({ url: url });
+        cookieStr = cookies.map(c => c.name + "=" + c.value).join("; ");
+    } catch(e) {
+        console.error("Failed to get cookies:", e);
+    }
     
     chrome.storage.sync.get(['server_url', 'api_key', 'client_id'], (items) => {
         const btn = document.getElementById('btn-direct-download');
@@ -187,6 +208,7 @@ document.getElementById('btn-direct-download').addEventListener('click', () => {
             body: JSON.stringify({
                 url: url,
                 target_clients: [items.client_id],
+                cookies: cookieStr,
                 user_agent: navigator.userAgent
             })
         })

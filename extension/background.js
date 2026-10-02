@@ -30,17 +30,12 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
 
         console.log("Interceptando download nativo:", downloadItem.url);
 
-        // Forward to our MachDown server immediately
-        forwardToMachdown(downloadItem.url);
-
-        // Cancel the native browser download
-        chrome.downloads.cancel(downloadItem.id).catch(err => {
-            console.error("Falha ao cancelar download nativo:", err);
-        });
+        // Forward to our MachDown server; cancels native download only after server confirms success
+        forwardToMachdown(downloadItem.url, downloadItem.id);
     });
 });
 
-function forwardToMachdown(urlToDownload) {
+function forwardToMachdown(urlToDownload, downloadItemId = null) {
     chrome.storage.sync.get(['server_url', 'api_key', 'client_id'], async (config) => {
         if (!config.server_url || !config.api_key) {
             chrome.notifications.create({
@@ -76,6 +71,11 @@ function forwardToMachdown(urlToDownload) {
             });
 
             if (response.ok) {
+                if (downloadItemId) {
+                    chrome.downloads.cancel(downloadItemId).catch(err => {
+                        console.error("Falha ao cancelar download nativo:", err);
+                    });
+                }
                 chrome.notifications.create({
                     type: "basic",
                     iconUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
