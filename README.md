@@ -1,5 +1,5 @@
 <p align="center">
-  <picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/header/graph.svg?title=MachDown&subtitle=Acelerador+de+downloads+em+Go+com+servidor+client+desktop+e+extensão+de+navegador&align=left&font=geist-mono&mode=dark" /><img alt="MachDown" src="https://shieldcn.dev/header/graph.svg?title=MachDown&subtitle=Acelerador+de+downloads+em+Go+com+servidor+client+desktop+e+extensão+de+navegador&align=left&font=geist-mono&mode=light" /></picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="https://shieldcn.dev/header/graph.svg?title=MachDown&subtitle=Acelerador+de+downloads+em+quase+Go+puro&align=left&font=geist-mono&mode=dark" /><img alt="MachDown" src="https://shieldcn.dev/header/graph.svg?title=MachDown&subtitle=Acelerador+de+downloads+em+quase+Go+puro&align=left&font=geist-mono&mode=light" /></picture>
 </p>
 
 <p align="center"><b>Português (BR)</b> · <a href="README.en.md">English</a></p>
