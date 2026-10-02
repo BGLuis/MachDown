@@ -2,7 +2,7 @@
 .env
 
 # MachDown Specific
-server/data/*.db
+server/data/*.db*
 server/downloads/
 server/bin/
 client/build/bin/
@@ -36,3 +36,16 @@ yarn-error.log*
 .vscode/
 .idea/
 *.swp
+
+# Certificates and Secrets
+server/data/*.crt
+server/data/*.key
+
+# Compiled Binaries
+server/server
+server/machdown-server
+client/machdown-client
+
+# Temp Agent Files
+*.patch
+*.py
