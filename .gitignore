@@ -49,3 +49,8 @@ client/machdown-client
 # Temp Agent Files
 *.patch
 *.py
+
+# Test artifacts
+tests/test_server/test_server
+tests/test_server/1gb.bin
+test.zip
