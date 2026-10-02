@@ -166,7 +166,7 @@ func (ctrl *AdminController) HandleForceSync(c *fiber.Ctx) error {
 			if job.TargetClients != "" {
 				json.Unmarshal([]byte(job.TargetClients), &clients)
 			}
-			
+
 			// Add if not present
 			found := false
 			for _, client := range clients {

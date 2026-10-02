@@ -1,8 +1,8 @@
 package repositories
 
 import (
-	"machdown/server/models"
 	"gorm.io/gorm"
+	"machdown/server/models"
 )
 
 type JobRepository struct {
@@ -91,4 +91,3 @@ func (r *JobRepository) FindAllJobs(limit, offset int) ([]models.DownloadJob, er
 	err := r.db.Order("created_at desc").Limit(limit).Offset(offset).Find(&jobs).Error
 	return jobs, err
 }
-

@@ -43,12 +43,12 @@ func (d *DiskManager) AllocateFile(jobID string, category string, totalSize int6
 		return "", err
 	}
 	defer f.Close()
-	
+
 	// Create sparse file (allocates logical size without using all physical disk space yet)
 	if err := f.Truncate(totalSize); err != nil {
 		return "", err
 	}
-	
+
 	return path, nil
 }
 
@@ -107,7 +107,7 @@ func (d *DiskManager) DeleteJobFiles(jobID string) error {
 	filePath := d.FindFilePath(jobID)
 	if filePath != "" {
 		_ = os.Remove(filePath)
-		
+
 		// Remove marker files
 		dir := filepath.Dir(filePath)
 		safeID := filepath.Base(jobID)
@@ -172,4 +172,3 @@ func (d *DiskManager) ListAllStoredFiles() ([]StoredFile, error) {
 
 	return results, err
 }
-

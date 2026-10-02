@@ -56,7 +56,7 @@ func RequireAuth(db *gorm.DB) fiber.Handler {
 			})
 		}
 
-// Atualizar tabela de clientes se enviar client_id
+		// Atualizar tabela de clientes se enviar client_id
 		clientID := c.Get("X-Client-ID")
 		if clientID == "" {
 			clientID = c.Query("client_id")

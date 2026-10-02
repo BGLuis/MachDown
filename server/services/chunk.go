@@ -32,17 +32,17 @@ func (c *ChunkDownloader) DownloadChunk(ctx context.Context, job *models.Downloa
 	if err != nil {
 		return err
 	}
-	
+
 	if job.Cookies != "" {
 		req.Header.Set("Cookie", job.Cookies)
 	}
 	if job.UserAgent != "" {
 		req.Header.Set("User-Agent", job.UserAgent)
 	}
-	
+
 	// Request specific byte range
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", chunk.StartByte, chunk.EndByte))
-	
+
 	client := GetSharedHTTPClient()
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
@@ -94,14 +94,14 @@ func (c *ChunkDownloader) DownloadChunk(ctx context.Context, job *models.Downloa
 
 	// Setup hashing for Merkle Tree leaves
 	hasher := sha256.New()
-	
+
 	// Create a TeeReader that writes to the hasher while reading from resp.Body
 	tee := io.TeeReader(resp.Body, hasher)
 
 	// Copy from tee to file
 	// Limit the read to exactly what we requested
 	limitReader := io.LimitReader(tee, chunk.EndByte-chunk.StartByte+1)
-	
+
 	if _, err := io.Copy(f, limitReader); err != nil {
 		return err
 	}
@@ -116,7 +116,7 @@ func (c *ChunkDownloader) DownloadSequential(ctx context.Context, job *models.Do
 	if err != nil {
 		return err
 	}
-	
+
 	if job.Cookies != "" {
 		req.Header.Set("Cookie", job.Cookies)
 	}
@@ -168,7 +168,7 @@ func (c *ChunkDownloader) DownloadSequential(ctx context.Context, job *models.Do
 			log.Printf("[JOB %s] Nome de arquivo real descoberto: %s", job.ID, job.FileName)
 		}
 	}
-	
+
 	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
@@ -192,17 +192,16 @@ func RetryDownload(operation func() (*http.Response, error)) (*http.Response, er
 		if err == nil {
 			return resp, nil
 		}
-		
+
 		if i == maxRetries {
 			break
 		}
 
 		delay := baseDelay * (1 << i)
-		jitter := time.Duration(rand.Int63n(int64(delay) / 5 + 1))
+		jitter := time.Duration(rand.Int63n(int64(delay)/5 + 1))
 		time.Sleep(delay + jitter)
 		log.Printf("Retry %d/%d after %v due to error: %v", i+1, maxRetries, delay+jitter, err)
 	}
 
 	return resp, err
 }
-

@@ -7,8 +7,8 @@ import (
 )
 
 type ClientConfig struct {
-	ServerURL    string `json:"server_url"`
-	APIKey       string `json:"api_key"`
+	ServerURL    string            `json:"server_url"`
+	APIKey       string            `json:"api_key"`
 	ClientID     string            `json:"client_id"`
 	DownloadPath string            `json:"download_path"`
 	SiteMappings map[string]string `json:"site_mappings,omitempty"`
@@ -64,7 +64,7 @@ func SaveConfig(cfg ClientConfig) error {
 func GetDefaultConfig() ClientConfig {
 	home, _ := os.UserHomeDir()
 	dlPath := filepath.Join(home, "Downloads", "MachDown")
-	
+
 	host, _ := os.Hostname()
 	if host == "" {
 		host = "machdown-client"

@@ -1,19 +1,19 @@
 package services
 
 import (
-	"encoding/json"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"machdown/server/models"
 	"machdown/server/repositories"
 	"machdown/server/storage"
 	"mime"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -102,8 +102,8 @@ type DownloadService struct {
 	Hub        *ProgressHub
 	resolver   *LinkResolver
 
-	activeJobs map[string]*models.DownloadJob
-	activeMu   sync.RWMutex
+	activeJobs      map[string]*models.DownloadJob
+	activeMu        sync.RWMutex
 	activeDownloads chan struct{}
 }
 
@@ -158,7 +158,6 @@ func getCategoryFromFileName(fileName string) string {
 		return "Others"
 	}
 }
-
 
 func (s *DownloadService) Enqueue(rawURL string, targetClients string, cookies string, userAgent string) (*models.DownloadJob, error) {
 	if err := isInternalURL(rawURL); err != nil {
@@ -295,7 +294,7 @@ func (s *DownloadService) processJob(job *models.DownloadJob) {
 			s.Hub.Broadcast(ProgressEvent{JobID: job.ID, TargetClients: job.TargetClients, Status: "Error"})
 		} else {
 			log.Printf("[JOB %s] Download sequencial concluído.", job.ID)
-			
+
 			filePath := s.disk.FindFilePath(job.ID)
 			fileHash, hErr := computeFileSHA256(filePath)
 			if hErr == nil && fileHash != "" {
@@ -303,10 +302,10 @@ func (s *DownloadService) processJob(job *models.DownloadJob) {
 				_ = s.repo.UpdateRootHash(job.ID, fileHash)
 				log.Printf("[JOB %s] Hash SHA-256 sequencial calculado: %s", job.ID, fileHash)
 			}
-			
+
 			// O nome do arquivo pode ter sido descoberto via Content-Disposition durante o download
 			_ = s.repo.UpdateJobFileName(job.ID, job.FileName)
-			
+
 			_ = s.repo.UpdateJobStatus(job.ID, "Completed")
 			s.Hub.Broadcast(ProgressEvent{JobID: job.ID, TargetClients: job.TargetClients, Status: "Completed", BytesDone: job.TotalSize, TotalSize: job.TotalSize})
 		}
@@ -409,10 +408,10 @@ func (s *DownloadService) startChunks(ctx context.Context, job *models.DownloadJ
 				mu.Unlock()
 			} else {
 				log.Printf("[JOB %s] Chunk %d-%d concluído com hash: %s", job.ID, chunk.StartByte, chunk.EndByte, chunk.Hash)
-				
+
 				chunkFile := fmt.Sprintf("%s.chunk_%d", filePath, chunk.StartByte)
 				_ = os.WriteFile(chunkFile, []byte("done"), 0644)
-				
+
 				mu.Lock()
 				bytesDone += chunk.EndByte - chunk.StartByte + 1
 				job.BytesDownloaded = bytesDone
@@ -496,7 +495,7 @@ func (s *DownloadService) ResumeDownload(jobID string) error {
 	_ = s.repo.UpdateJobStatus(job.ID, "Queued")
 	job.Status = "Queued"
 	s.Hub.Broadcast(ProgressEvent{JobID: jobID, TargetClients: job.TargetClients, Status: "Queued", TotalSize: job.TotalSize})
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 	job.CancelFunc = cancel
 

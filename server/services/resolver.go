@@ -219,7 +219,7 @@ func resolveWorkUpload(r *LinkResolver, originalURL string, cookies string, user
 	defer resp3.Body.Close()
 
 	var dlResp downloadServerResponse
-	
+
 	// Ler o corpo primeiro para podermos debugar se falhar
 	respBytes, readErr := io.ReadAll(resp3.Body)
 	if readErr != nil {
@@ -347,11 +347,11 @@ func (j *cookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	defer j.mu.Unlock()
 
 	host := j.normalizeHost(u.Hostname())
-	
+
 	// Para evitar cookies duplicados obsoletos, vamos sobrescrever cookies com o mesmo nome
 	existing := j.cookies[host]
 	var updated []*http.Cookie
-	
+
 	for _, oldCookie := range existing {
 		overwritten := false
 		for _, newCookie := range cookies {
@@ -364,7 +364,7 @@ func (j *cookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 			updated = append(updated, oldCookie)
 		}
 	}
-	
+
 	updated = append(updated, cookies...)
 	j.cookies[host] = updated
 }

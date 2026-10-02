@@ -10,13 +10,13 @@ import (
 	"encoding/pem"
 	"errors"
 	"log"
-	"math/big"
-	"net"
 	"machdown/server/api"
 	"machdown/server/models"
 	"machdown/server/repositories"
 	"machdown/server/services"
 	"machdown/server/storage"
+	"math/big"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -178,7 +178,7 @@ func main() {
 	apiGroup.Get("/admin/config", adminController.HandleGetConfig)
 	apiGroup.Put("/admin/config", adminController.HandleUpdateConfig)
 	apiGroup.Post("/admin/clean", adminController.HandleClean)
-	
+
 	apiGroup.Get("/admin/apikeys", adminController.HandleListAPIKeys)
 	apiGroup.Post("/admin/apikeys", adminController.HandleCreateAPIKey)
 	apiGroup.Delete("/admin/apikeys/:key", adminController.HandleDeleteAPIKey)
@@ -189,9 +189,9 @@ func main() {
 	if port == "" {
 		port = "8888"
 	}
-	
+
 	log.Printf("MachDown Server rodando em :%s\n", port)
-	
+
 	go func() {
 		if err := app.ListenTLS(":"+port, certFile, keyFile); err != nil {
 			log.Printf("Erro no servidor: %v\n", err)

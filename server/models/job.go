@@ -13,23 +13,23 @@ import (
 )
 
 type DownloadJob struct {
-	ID            string    `gorm:"primaryKey" json:"id"`
-	Priority      int       `json:"priority"`
-	URL           string    `json:"url"`
-	FileName      string    `json:"file_name"`
-	Category      string    `json:"category"`
+	ID              string             `gorm:"primaryKey" json:"id"`
+	Priority        int                `json:"priority"`
+	URL             string             `json:"url"`
+	FileName        string             `json:"file_name"`
+	Category        string             `json:"category"`
 	TotalSize       int64              `json:"total_size"`
 	Status          string             `json:"status"` // Pending, Downloading, Paused, Completed, Error
 	State           string             `json:"state"`
 	BytesDownloaded int64              `json:"bytes_downloaded"`
 	CancelFunc      context.CancelFunc `gorm:"-" json:"-"`
 	ETag            string             `json:"etag"` // HTTP ETag para deduplicação
-	RootHash      string    `json:"root_hash"`
-	TargetClients string    `json:"target_clients"` // JSON array string de client IDs
-	Cookies       string    `json:"cookies"`
-	UserAgent     string    `json:"user_agent"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	RootHash        string             `json:"root_hash"`
+	TargetClients   string             `json:"target_clients"` // JSON array string de client IDs
+	Cookies         string             `json:"cookies"`
+	UserAgent       string             `json:"user_agent"`
+	CreatedAt       time.Time          `json:"created_at"`
+	UpdatedAt       time.Time          `json:"updated_at"`
 }
 
 type ChunkTask struct {
@@ -69,7 +69,7 @@ func GenerateAPIKeyData(rawKey string) (id string, keyHash string, prefix string
 	salt := make([]byte, 16)
 	rand.Read(salt)
 	hashArgon := argon2.IDKey([]byte(rawKey), salt, 1, 64*1024, 4, 32)
-	
+
 	keyHash = hex.EncodeToString(salt) + "." + hex.EncodeToString(hashArgon)
 	return id, keyHash, prefix
 }
@@ -89,7 +89,7 @@ func VerifyAPIKey(rawKey, keyHash string) bool {
 }
 
 type Client struct {
-	ID        string    `gorm:"primaryKey" json:"id"`
-	LastSeen  time.Time `json:"last_seen"`
-	IP        string    `json:"ip"`
+	ID       string    `gorm:"primaryKey" json:"id"`
+	LastSeen time.Time `json:"last_seen"`
+	IP       string    `json:"ip"`
 }

@@ -64,4 +64,3 @@ func (a *App) IsConfigured() bool {
 	}
 	return cfg.APIKey != "" && cfg.ServerURL != "" && cfg.ClientID != ""
 }
-
