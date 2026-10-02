@@ -12,6 +12,8 @@ type ClientConfig struct {
 	ClientID     string            `json:"client_id"`
 	DownloadPath string            `json:"download_path"`
 	SiteMappings map[string]string `json:"site_mappings,omitempty"`
+	// ServerCertFingerprint pins the server's SHA-256 certificate fingerprint (hex), required for its self-signed certificate.
+	ServerCertFingerprint string `json:"server_cert_fingerprint,omitempty"`
 }
 
 func GetConfigPath() (string, error) {

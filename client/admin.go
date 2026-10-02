@@ -2,10 +2,10 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"machdown-client/netutil"
 	"net/http"
 )
 
@@ -39,11 +39,7 @@ func (a *App) doAdminRequest(method, endpoint string, body io.Reader) (*http.Res
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	client := &http.Client{Transport: tr}
-	return client.Do(req)
+	return netutil.Client(cfg.ServerCertFingerprint).Do(req)
 }
 
 // ListServerFiles fetches the list of files in the server's storage

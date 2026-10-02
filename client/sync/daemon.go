@@ -2,19 +2,21 @@ package sync
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"net/url"
-	"strings"
 	"machdown-client/config"
+	"machdown-client/netutil"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,146 +31,169 @@ type SyncJob struct {
 }
 
 type SyncDaemon struct {
+	mu         sync.RWMutex
 	cfg        config.ClientConfig
-	isRunning  bool
-	stopChan   chan struct{}
-	ActiveJobs []SyncJob
+	cancel     context.CancelFunc
+	activeJobs []SyncJob
 }
 
 func NewSyncDaemon(cfg config.ClientConfig) *SyncDaemon {
 	return &SyncDaemon{
 		cfg:        cfg,
-		stopChan:   make(chan struct{}),
-		ActiveJobs: make([]SyncJob, 0),
+		activeJobs: make([]SyncJob, 0),
 	}
 }
 
 func (d *SyncDaemon) UpdateConfig(cfg config.ClientConfig) {
+	d.mu.Lock()
 	d.cfg = cfg
+	d.mu.Unlock()
+}
+
+func (d *SyncDaemon) config() config.ClientConfig {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.cfg
 }
 
 func (d *SyncDaemon) Start() {
-	if d.isRunning {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cancel != nil {
 		return
 	}
-	d.isRunning = true
-	go d.poll()
+	ctx, cancel := context.WithCancel(context.Background())
+	d.cancel = cancel
+	go d.poll(ctx)
 }
 
+// Stop cancels the daemon; in-flight requests (including the SSE stream) are aborted.
 func (d *SyncDaemon) Stop() {
-	if !d.isRunning {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cancel == nil {
 		return
 	}
-	d.isRunning = false
-	d.stopChan <- struct{}{}
+	d.cancel()
+	d.cancel = nil
 }
 
+// GetJobs returns a snapshot of the current sync jobs.
 func (d *SyncDaemon) GetJobs() []SyncJob {
-	return d.ActiveJobs
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return append([]SyncJob(nil), d.activeJobs...)
 }
 
-func (d *SyncDaemon) poll() {
-	for {
-		select {
-		case <-d.stopChan:
-			log.Println("SyncDaemon: Parado")
-			return
-		default:
-			if d.cfg.APIKey == "" || d.cfg.ServerURL == "" || d.cfg.ClientID == "" {
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			d.listenSSE()
-		}
+func (d *SyncDaemon) setJobs(jobs []SyncJob) {
+	snapshot := append([]SyncJob(nil), jobs...)
+	d.mu.Lock()
+	d.activeJobs = snapshot
+	d.mu.Unlock()
+}
+
+func sleepCtx(ctx context.Context, wait time.Duration) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(wait):
 	}
 }
 
-func (d *SyncDaemon) listenSSE() {
-	req, err := http.NewRequest("GET", d.cfg.ServerURL+"/api/events", nil)
+func (d *SyncDaemon) poll(ctx context.Context) {
+	defer log.Println("SyncDaemon: Parado")
+	for ctx.Err() == nil {
+		cfg := d.config()
+		if cfg.APIKey == "" || cfg.ServerURL == "" || cfg.ClientID == "" {
+			sleepCtx(ctx, 5*time.Second)
+			continue
+		}
+		d.listenSSE(ctx, cfg)
+	}
+}
+
+func (d *SyncDaemon) listenSSE(ctx context.Context, cfg config.ClientConfig) {
+	req, err := http.NewRequestWithContext(ctx, "GET", cfg.ServerURL+"/api/events", nil)
 	if err != nil {
-		time.Sleep(5 * time.Second)
+		sleepCtx(ctx, 5*time.Second)
 		return
 	}
-	req.Header.Set("X-API-Key", d.cfg.APIKey)
+	req.Header.Set("X-API-Key", cfg.APIKey)
+	req.Header.Set("X-Client-ID", cfg.ClientID)
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	client := &http.Client{Transport: tr}
-	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != 200 {
-		if resp != nil {
-			log.Printf("SSE request failed. Status: %v", resp.StatusCode)
-		} else {
-			log.Printf("SSE request failed. Error: %v", err)
-		}
-		time.Sleep(5 * time.Second)
+	resp, err := netutil.Client(cfg.ServerCertFingerprint).Do(req)
+	if err != nil {
+		log.Printf("SSE request failed. Error: %v", err)
+		sleepCtx(ctx, 5*time.Second)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("SSE request failed. Status: %v", resp.StatusCode)
+		sleepCtx(ctx, 5*time.Second)
+		return
+	}
+
+	// Jobs completed while the stream was down produce no event, so catch up on connect.
+	d.fetchCompletedJobs(ctx, cfg)
 
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
-		select {
-		case <-d.stopChan:
-			return
-		default:
-		}
-
 		line := scanner.Text()
 		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
 			var evt map[string]interface{}
 			if err := json.Unmarshal([]byte(data), &evt); err == nil {
 				if status, ok := evt["status"].(string); ok && status == "Completed" {
-					d.fetchCompletedJobs()
+					d.fetchCompletedJobs(ctx, cfg)
 				}
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
 		log.Printf("SSE scanner error: %v", err)
 	}
-	time.Sleep(2 * time.Second)
+	sleepCtx(ctx, 2*time.Second)
 }
 
-func (d *SyncDaemon) fetchCompletedJobs() {
-	req, _ := http.NewRequest("GET", d.cfg.ServerURL+"/api/downloads/completed?client_id="+d.cfg.ClientID, nil)
-	req.Header.Set("X-API-Key", d.cfg.APIKey)
-
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+func (d *SyncDaemon) fetchCompletedJobs(ctx context.Context, cfg config.ClientConfig) {
+	req, err := http.NewRequestWithContext(ctx, "GET", cfg.ServerURL+"/api/downloads/completed?client_id="+url.QueryEscape(cfg.ClientID), nil)
+	if err != nil {
+		return
 	}
-	client := &http.Client{Transport: tr}
-	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != 200 {
+	req.Header.Set("X-API-Key", cfg.APIKey)
+
+	resp, err := netutil.Client(cfg.ServerCertFingerprint).Do(req)
+	if err != nil {
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
 
 	var jobs []SyncJob
 	if err := json.NewDecoder(resp.Body).Decode(&jobs); err != nil {
 		return
 	}
 
-	d.ActiveJobs = jobs
+	d.setJobs(jobs)
 
 	for i := range jobs {
 		jobs[i].Status = "Syncing"
-		d.ActiveJobs = jobs
-		d.downloadFile(&jobs[i])
-		d.ActiveJobs = jobs
+		d.setJobs(jobs)
+		d.downloadFile(ctx, cfg, &jobs[i])
+		d.setJobs(jobs)
 	}
 }
 
-func (d *SyncDaemon) downloadFile(job *SyncJob) {
+func (d *SyncDaemon) downloadFile(ctx context.Context, cfg config.ClientConfig, job *SyncJob) {
 	log.Printf("Iniciando sincronização do job %s (%s)", job.ID, job.FileName)
 
 	// Determinar pasta base com base na URL
-	basePath := d.cfg.DownloadPath
+	basePath := cfg.DownloadPath
 	if u, err := url.Parse(job.URL); err == nil && u.Hostname() != "" {
 		host := u.Hostname()
-		for domain, customPath := range d.cfg.SiteMappings {
+		for domain, customPath := range cfg.SiteMappings {
 			if host == domain || strings.HasSuffix(host, "."+domain) {
 				basePath = customPath
 				break
@@ -196,20 +221,27 @@ func (d *SyncDaemon) downloadFile(job *SyncJob) {
 		return
 	}
 
-	req, _ := http.NewRequest("GET", d.cfg.ServerURL+"/api/downloads/"+job.ID+"/file", nil)
-	req.Header.Set("X-API-Key", d.cfg.APIKey)
-
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	req, err := http.NewRequestWithContext(ctx, "GET", cfg.ServerURL+"/api/downloads/"+job.ID+"/file", nil)
+	if err != nil {
+		log.Printf("[JOB %s] Falha ao montar requisição: %v", job.ID, err)
+		job.Status = "Error"
+		return
 	}
-	client := &http.Client{Transport: tr}
+	req.Header.Set("X-API-Key", cfg.APIKey)
+
+	client := netutil.Client(cfg.ServerCertFingerprint)
 	resp, err := client.Do(req)
-	if err != nil || resp.StatusCode != 200 {
-		log.Printf("[JOB %s] Falha ao buscar arquivo do servidor: status=%v err=%v", job.ID, resp.StatusCode, err)
+	if err != nil {
+		log.Printf("[JOB %s] Falha ao buscar arquivo do servidor: %v", job.ID, err)
 		job.Status = "Error"
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[JOB %s] Falha ao buscar arquivo do servidor: status=%d", job.ID, resp.StatusCode)
+		job.Status = "Error"
+		return
+	}
 
 	// Escrever em arquivo temporário primeiro para evitar arquivo corrompido em destino final
 	tmpPath := destPath + ".tmp"
@@ -258,9 +290,17 @@ func (d *SyncDaemon) downloadFile(job *SyncJob) {
 	log.Printf("[JOB %s] ✅ Arquivo salvo em %s (hash: %s)", job.ID, destPath, computedHash)
 
 	// Marcar como sincronizado no servidor para não re-baixar
-	markReq, _ := http.NewRequest("POST", d.cfg.ServerURL+"/api/downloads/"+job.ID+"/synced", nil)
-	markReq.Header.Set("X-API-Key", d.cfg.APIKey)
-	client.Do(markReq)
+	markReq, err := http.NewRequestWithContext(ctx, "POST", cfg.ServerURL+"/api/downloads/"+job.ID+"/synced", nil)
+	if err != nil {
+		return
+	}
+	markReq.Header.Set("X-API-Key", cfg.APIKey)
+	markResp, err := client.Do(markReq)
+	if err != nil {
+		log.Printf("[JOB %s] Falha ao marcar como sincronizado: %v", job.ID, err)
+		return
+	}
+	markResp.Body.Close()
 }
 
 // atomicMove move um arquivo de src para dst.

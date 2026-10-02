@@ -14,8 +14,9 @@ function showScreen(name) {
 // --- Tela de Configuração ---
 function loadConfig() {
     GetConfig().then(cfg => {
-        document.getElementById('server_url').value = cfg.server_url || 'http://localhost:8888';
+        document.getElementById('server_url').value = cfg.server_url || 'https://localhost:8888';
         document.getElementById('api_key').value = cfg.api_key || '';
+        document.getElementById('server_cert_fingerprint').value = cfg.server_cert_fingerprint || '';
         document.getElementById('client_id').value = cfg.client_id || '';
         document.getElementById('download_path').value = cfg.download_path || '';
         document.getElementById('site_mappings').value = cfg.site_mappings ? JSON.stringify(cfg.site_mappings, null, 2) : '';
@@ -26,6 +27,7 @@ window.saveConfig = function () {
     const cfg = {
         server_url: document.getElementById('server_url').value.trim().replace(/\/$/, ''),
         api_key: document.getElementById('api_key').value.trim(),
+        server_cert_fingerprint: document.getElementById('server_cert_fingerprint').value.trim(),
         client_id: document.getElementById('client_id').value.trim(),
         download_path: document.getElementById('download_path').value.trim(),
         site_mappings: {}

@@ -6,6 +6,7 @@ export namespace config {
 	    client_id: string;
 	    download_path: string;
 	    site_mappings?: Record<string, string>;
+	    server_cert_fingerprint?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ClientConfig(source);
@@ -18,6 +19,7 @@ export namespace config {
 	        this.client_id = source["client_id"];
 	        this.download_path = source["download_path"];
 	        this.site_mappings = source["site_mappings"];
+        this.server_cert_fingerprint = source["server_cert_fingerprint"];
 	    }
 	}
 
