@@ -76,6 +76,17 @@ window.cancelSetup = function () {
     showScreen('main');
 };
 
+// Sanitização contra Stored XSS
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
 // --- Tela Principal (Dashboard) ---
 function renderJobs(jobs) {
     const list = document.getElementById('jobs-list');
@@ -85,16 +96,18 @@ function renderJobs(jobs) {
     }
 
     list.innerHTML = jobs.map(j => {
-        const pct = j.total_size > 0
-            ? Math.round((j.downloaded / j.total_size) * 100)
-            : 0;
+        const downloaded = j.downloaded || 0;
+        const total = j.total_size || 0;
+        const pct = total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : 0;
         const statusIcon = j.status === 'Completed' ? '✅'
             : j.status === 'Error' ? '❌'
             : '⏳';
+        const safeName = escapeHtml(j.file_name || 'arquivo');
+        const safeStatus = escapeHtml(j.status || 'Pendente');
         return `
             <li class="job-item">
-                <span class="job-name">${statusIcon} ${j.file_name}</span>
-                <span class="job-status">${j.status}</span>
+                <span class="job-name">${statusIcon} ${safeName}</span>
+                <span class="job-status">${safeStatus} (${pct}%)</span>
                 <div class="progress-bar">
                     <div class="progress-fill" style="width:${pct}%"></div>
                 </div>
@@ -198,18 +211,21 @@ window.loadServerFiles = function () {
             else if (f.status === 'Unknown') statusBadge = '👻';
             else statusBadge = '⏳';
             
+            const safeName = escapeHtml(f.name || f.id);
+            const safeId = escapeHtml(f.id);
+
             return `
                 <li class="job-item" style="display:flex; justify-content:space-between; align-items:center;">
                     <div style="display:flex; align-items:center; gap: 10px;">
-                        <input type="checkbox" class="file-checkbox" value="${f.id}">
-                        <span>${statusBadge} ${f.name} <small>(${sizeMB} MB)</small></span>
+                        <input type="checkbox" class="file-checkbox" value="${safeId}">
+                        <span>${statusBadge} ${safeName} <small>(${sizeMB} MB)</small></span>
                     </div>
-                    <button class="icon-btn" onclick="deleteServerFile('${f.id}')" title="Excluir">🗑️</button>
+                    <button class="icon-btn" onclick="deleteServerFile('${safeId}')" title="Excluir">🗑️</button>
                 </li>
             `;
         }).join('');
     }).catch(err => {
-        list.innerHTML = `<li class="empty" style="color:#ef4444;">Erro ao carregar arquivos: ${err}</li>`;
+        list.innerHTML = `<li class="empty" style="color:#ef4444;">Erro ao carregar arquivos: ${escapeHtml(err)}</li>`;
     });
 };
 
@@ -271,18 +287,21 @@ window.loadAPIKeys = function() {
         }
         
         list.innerHTML = keys.map(k => {
+            const safeName = escapeHtml(k.name || 'Sem nome');
+            const safePrefix = escapeHtml(k.key_prefix || (k.key ? k.key.substring(0, 8) : ''));
+            const keyId = escapeHtml(k.id || k.key || '');
             return `
                 <li class="job-item" style="display:flex; justify-content:space-between; align-items:center;">
                     <div>
-                        <strong>${k.name}</strong><br/>
-                        <small style="font-family:monospace; color:#aaa;">${k.key}</small>
+                        <strong>${safeName}</strong><br/>
+                        <small style="font-family:monospace; color:#aaa;">Prefixo: ${safePrefix}...</small>
                     </div>
-                    <button class="icon-btn" onclick="deleteAPIKey('${k.key}')" title="Excluir">🗑️</button>
+                    <button class="icon-btn" onclick="deleteAPIKey('${keyId}')" title="Excluir">🗑️</button>
                 </li>
             `;
         }).join('');
     }).catch(err => {
-        list.innerHTML = `<li class="empty" style="color:#ef4444;">Erro ao carregar chaves: ${err}</li>`;
+        list.innerHTML = `<li class="empty" style="color:#ef4444;">Erro ao carregar chaves: ${escapeHtml(err)}</li>`;
     });
 };
 
@@ -302,10 +321,10 @@ window.createAPIKey = function() {
     });
 };
 
-window.deleteAPIKey = function(key) {
+window.deleteAPIKey = function(keyId) {
     if (!confirm('Tem certeza que deseja excluir esta chave de API? Qualquer cliente usando-a perderá acesso imediatamente.')) return;
     
-    DeleteAPIKey(key).then(() => {
+    DeleteAPIKey(keyId).then(() => {
         alert('✅ Chave excluída com sucesso!');
         window.loadAPIKeys();
     }).catch(err => {
@@ -324,14 +343,16 @@ window.loadClients = function() {
         
         list.innerHTML = clients.map(c => {
             const date = new Date(c.last_seen).toLocaleString();
+            const safeId = escapeHtml(c.id);
+            const safeIp = escapeHtml(c.ip);
             return `
                 <li class="job-item">
-                    <strong>${c.id}</strong><br/>
-                    <small style="color:#aaa;">Último acesso: ${date} - IP: ${c.ip}</small>
+                    <strong>${safeId}</strong><br/>
+                    <small style="color:#aaa;">Último acesso: ${date} - IP: ${safeIp}</small>
                 </li>
             `;
         }).join('');
     }).catch(err => {
-        list.innerHTML = `<li class="empty" style="color:#ef4444;">Erro ao carregar clientes: ${err}</li>`;
+        list.innerHTML = `<li class="empty" style="color:#ef4444;">Erro ao carregar clientes: ${escapeHtml(err)}</li>`;
     });
 };

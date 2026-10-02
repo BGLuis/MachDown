@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,7 +39,10 @@ func (a *App) doAdminRequest(method, endpoint string, body io.Reader) (*http.Res
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	client := &http.Client{}
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr}
 	return client.Do(req)
 }
 
@@ -160,7 +164,9 @@ func (a *App) ForceSyncBatchServerFiles(ids []string) error {
 }
 
 type APIKeyDTO struct {
+	ID        string `json:"id"`
 	Key       string `json:"key"`
+	KeyPrefix string `json:"key_prefix"`
 	Name      string `json:"name"`
 	CreatedAt string `json:"created_at"`
 }
@@ -198,8 +204,8 @@ func (a *App) CreateAPIKey(name, key string) error {
 }
 
 // DeleteAPIKey deletes an API Key from the server
-func (a *App) DeleteAPIKey(key string) error {
-	resp, err := a.doAdminRequest("DELETE", "/api/admin/apikeys/"+key, nil)
+func (a *App) DeleteAPIKey(id string) error {
+	resp, err := a.doAdminRequest("DELETE", "/api/admin/apikeys/"+id, nil)
 	if err != nil {
 		return err
 	}

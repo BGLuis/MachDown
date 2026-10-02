@@ -69,7 +69,7 @@ func GetDefaultConfig() ClientConfig {
 	}
 
 	return ClientConfig{
-		ServerURL:    "http://localhost:8888",
+		ServerURL:    "https://localhost:8888",
 		APIKey:       "",
 		ClientID:     host,
 		DownloadPath: dlPath,
