@@ -44,7 +44,7 @@ echo "API Key: $API_KEY"
 
 # 3. Enqueue download
 echo "Enqueueing download..."
-curl -s -X POST http://localhost:8888/api/downloads \
+curl -sk -X POST https://localhost:8888/api/downloads \
      -H "Content-Type: application/json" \
      -H "X-API-Key: $API_KEY" \
      -d '{

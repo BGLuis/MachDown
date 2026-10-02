@@ -5,7 +5,7 @@
 # =============================================================================
 #
 # Usage: ./scripts/test-api.sh [API_KEY] [BASE_URL]
-#        Default BASE_URL: http://localhost:8888
+#        Default BASE_URL: https://localhost:8888
 #
 # Requirements:
 # - No external dependencies (no jq, only curl and bash)
@@ -41,7 +41,7 @@
 # CONFIGURATION
 # -----------------------------------------------------------------------------
 API_KEY="${1:-}"
-BASE_URL="${2:-http://localhost:8888}"
+BASE_URL="${2:-https://localhost:8888}"
 
 if [ -z "$API_KEY" ]; then
     echo "Error: API_KEY is required as the first argument."
@@ -163,7 +163,7 @@ TESTS_TOTAL=$((TESTS_TOTAL + 1))
 print_test_header "$TEST_ID: $TEST_DESC"
 print_expected "HTTP $EXPECTED"
 print_result
-HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" -X POST "${BASE_URL}/api/downloads" \
+HTTP_CODE=$(curl -sk -o /tmp/response.txt -w "%{http_code}" -X POST "${BASE_URL}/api/downloads" \
     -H "Content-Type: application/json" \
     -m 10 \
     -d '{"url": "https://speed.hetzner.de/100MB.bin"}')
@@ -178,7 +178,7 @@ TESTS_TOTAL=$((TESTS_TOTAL + 1))
 print_test_header "$TEST_ID: $TEST_DESC"
 print_expected "HTTP $EXPECTED"
 print_result
-HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" -X POST "${BASE_URL}/api/downloads" \
+HTTP_CODE=$(curl -sk -o /tmp/response.txt -w "%{http_code}" -X POST "${BASE_URL}/api/downloads" \
     -H "Content-Type: application/json" \
     -H "X-API-Key: invalid-fake-key" \
     -m 10 \
@@ -194,7 +194,7 @@ TESTS_TOTAL=$((TESTS_TOTAL + 1))
 print_test_header "$TEST_ID: $TEST_DESC"
 print_expected "HTTP $EXPECTED"
 print_result
-HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" -X POST "${BASE_URL}/api/downloads" \
+HTTP_CODE=$(curl -sk -o /tmp/response.txt -w "%{http_code}" -X POST "${BASE_URL}/api/downloads" \
     -H "Content-Type: application/json" \
     -H "X-API-Key: ${API_KEY}" \
     -m 10 \
@@ -210,7 +210,7 @@ TESTS_TOTAL=$((TESTS_TOTAL + 1))
 print_test_header "$TEST_ID: $TEST_DESC"
 print_expected "HTTP $EXPECTED"
 print_result
-HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" -X POST "${BASE_URL}/api/downloads" \
+HTTP_CODE=$(curl -sk -o /tmp/response.txt -w "%{http_code}" -X POST "${BASE_URL}/api/downloads" \
     -H "Content-Type: application/json" \
     -H "X-API-Key: ${API_KEY}" \
     -m 10 \

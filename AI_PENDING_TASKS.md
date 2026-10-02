@@ -23,6 +23,16 @@ Este arquivo contém o levantamento das pendências e features ausentes no códi
 *   **Bug de Path — `HandleDownloadFile`:** O path do arquivo estava hardcoded como `"downloads/" + jobID`, ignorando o `StoragePath` configurado pelo usuário. Agora usa `downloadService.GetFilePath(jobID)` que delega ao `DiskManager`. **Corrigido.**
 *   **Melhoria — Download Atômico no Client:** O client escrevia diretamente no arquivo destino. Se o processo morresse durante o download, ficava um arquivo corrompido no diretório. Agora usa arquivo `.tmp` + `atomicMove` para garantir atomicidade. **Implementado.**
 
+## 🔒 Segurança e Transporte (estado atual)
+
+*   **TLS:** o servidor usa certificado self-signed (`server/data/server.crt`), gerado na primeira execução. O fingerprint SHA-256 é exibido no log de inicialização.
+*   **Pinning no Client:** o Client não usa mais `InsecureSkipVerify`. Cole o fingerprint em *Fingerprint do Certificado* nas configurações (`server_cert_fingerprint`); sem ele, vale a verificação padrão e um certificado self-signed é rejeitado. Código em `client/netutil/client.go`.
+*   **API Keys:** apenas hashes Argon2id na tabela `api_keys`. A chave inicial (`MACHDOWN_API_KEY`) é migrada na inicialização e a coluna em texto puro é zerada. Não há mais fallback para chave em texto puro, e `/api/admin/config` não expõe nem aceita `api_key`.
+*   **Rate limit:** 20 req/s por IP (`server/api/middleware.go`).
+*   **SSE:** `GET /api/events` filtra os eventos por `X-Client-ID` conforme `target_clients`; sem o header, recebe tudo. Ao conectar, o Client busca jobs concluídos enquanto estava offline.
+*   **SSRF:** validação no enqueue, nos redirects e no momento do dial. O transport compartilhado ignora proxies de ambiente (`HTTP(S)_PROXY`), pois um proxy contornaria a checagem de IP.
+*   **Pendente:** a extensão do navegador ainda precisa confiar no certificado self-signed (instalá-lo no sistema/navegador); os binários e arquivos de teste removidos do índice continuam no histórico do git.
+
 ---
 **Instruções para o próximo Agente:**
 1. Leia o SPDD relevante em `spdd/prompt/` para a task escolhida.
